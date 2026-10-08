@@ -1,5 +1,5 @@
 {
-  "status": "SOURCE_PUBLICATION_OWNER_APPROVED_NOT_PRODUCTION_CERTIFIED",
+  "status": "ALPHA_RELEASE_OWNER_APPROVED_NOT_PRODUCTION_CERTIFIED",
   "public_repository": "roller11/vecretary-memory",
   "profile": "sqlite",
   "files": [
@@ -102,14 +102,14 @@
     {
       "source": "docs/sqlite-release/README.md",
       "path": "README.md",
-      "sha256": "347789be118f700eefe5ce23f3b3588363ec3bd421505a1cc3c3c967028634a7",
-      "bytes": 9288
+      "sha256": "f128b4209742baf5134bb64f6a0663c8b76ba28aa15c6846b533fb162a7744e3",
+      "bytes": 9287
     },
     {
       "source": "docs/sqlite-release/README.md",
       "path": "docs/sqlite-release/README.md",
-      "sha256": "347789be118f700eefe5ce23f3b3588363ec3bd421505a1cc3c3c967028634a7",
-      "bytes": 9288
+      "sha256": "f128b4209742baf5134bb64f6a0663c8b76ba28aa15c6846b533fb162a7744e3",
+      "bytes": 9287
     },
     {
       "source": "docs/sqlite-release/RELEASE_GATES.md",
@@ -126,14 +126,14 @@
     {
       "source": "docs/sqlite-release/RELEASE_NOTES.md",
       "path": "RELEASE_NOTES.md",
-      "sha256": "24546a976a9f853fa344f05d3343153669276d76b614e3b72c1161549660f9ea",
-      "bytes": 2624
+      "sha256": "e96a2b48ead97479f28214ba74e8bfb76982a9e04f1730b7087bafafd481b5f0",
+      "bytes": 2702
     },
     {
       "source": "docs/sqlite-release/RELEASE_NOTES.md",
       "path": "docs/sqlite-release/RELEASE_NOTES.md",
-      "sha256": "24546a976a9f853fa344f05d3343153669276d76b614e3b72c1161549660f9ea",
-      "bytes": 2624
+      "sha256": "e96a2b48ead97479f28214ba74e8bfb76982a9e04f1730b7087bafafd481b5f0",
+      "bytes": 2702
     },
     {
       "source": "docs/sqlite-release/SECURITY.md",

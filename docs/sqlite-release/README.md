@@ -62,8 +62,8 @@ Bootstrap the reviewed installer/build tooling in that isolated environment:
 python -m pip install --upgrade pip==26.2.1 setuptools==83.0.0
 ```
 
-This repository initially publishes reviewed alpha source, not a tagged binary
-release. Build a wheel from the repository root:
+For the downloadable alpha, obtain the wheel and requirements-linux.txt from
+the GitHub prerelease. Alternatively, build a wheel from the repository root:
 
 ```sh
 python -m pip wheel . --no-deps --wheel-dir dist
@@ -131,7 +131,7 @@ stdio, owner dashboard boundaries and timer/access/keyword-pop persistence acros
 restart on isolated synthetic notes. That is not observed agent/chat/reload
 acceptance, crash recovery or a provider performance guarantee.
 Full auxiliary-state migration, broader provider compatibility, crash consistency
-and a tagged binary release remain separate gates. Legacy source modules
+remain separate gates. Legacy source modules
 are retained for compatibility review but their Chroma dependencies and commands
 are not installed or supported by this SQLite profile.
 

@@ -33,7 +33,8 @@ prepublication RC26 passed hosted Python 3.11/3.12 checks, each with 859 passed
 and four optional skips, and 60-distribution audits with zero findings. Hosted
 SQLite bytes matched the reviewed Ubuntu package. Public repository workflows
 verify their own revision; no result certifies arbitrary host SQLite builds.
-This is an initial source-only publication, not a tagged binary release.
+The tagged alpha provides a wheel, exact-revision source ZIP, installation
+constraints and SHA256 checksums. It is a prerelease, not a stable release.
 
 No artwork is bundled in this candidate. Core scoring, timers and pop behavior
 are unchanged. A proposed vector-recall importance-feedback policy is not
