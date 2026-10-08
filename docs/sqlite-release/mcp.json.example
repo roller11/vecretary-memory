@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "vecretary": {
+      "type": "stdio",
+      "command": "vecretary-mcp",
+      "args": [
+        "--database-dir", "/absolute/runtime/sqlite",
+        "--data-dir", "/absolute/runtime",
+        "--identity", "/absolute/runtime/embedding-identity.json",
+        "--provider-config", "/absolute/local-provider.json",
+        "--dashboard-port", "8767"
+      ]
+    }
+  }
+}

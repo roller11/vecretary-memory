@@ -1,0 +1,16 @@
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+instinct_data/
+*.sqlite3
+*.log
+docs/PRIVATE_*.json
+docs/SLICE_*_TRANSFER_MANIFEST.json
+docs/SLICE_*_VALIDATION.json

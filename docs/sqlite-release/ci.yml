@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MPL-2.0
+name: SQLite alpha checks
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  linux-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Build isolated wheel
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+      - name: Bootstrap audited installer
+        run: python -m pip install --upgrade pip==26.2.1 setuptools==83.0.0
+      - name: Install SQLite wheel and test tools
+        run: python -m pip install -c requirements-linux.txt dist/*.whl pytest pytest-asyncio
+      - name: Record effective native SQLite build
+        run: python -I tools/collect_sqlite_runtime.py --output build/sqlite-runtime.json
+      - name: Check installed dependency consistency and startup
+        run: |
+          python -m pip check
+          python -I tools/check_sqlite_installed.py
+      - name: SQLite and existing lifecycle regressions
+        shell: bash
+        run: python -m pytest tests/test_sqlite*.py tests/test_session_timer.py tests/test_nudge_session.py tests/test_active_time.py tests/test_pop_scoring.py tests/test_decay_bands.py tests/test_mandatory_lifecycle.py tests/test_dependency_license_collection.py tests/test_public_draft.py -q
+      - name: Dashboard reconnect and security regressions
+        run: |
+          node --version
+          python -m pytest tests/test_dashboard_security.py tests/test_dashboard_features.py tests/test_privacy_security_gates.py -q
+      - name: Collect installed license evidence
+        run: python -I tools/collect_dependency_licenses.py --output build/license-inventory.json
+      - name: Install advisory scanner
+        run: python -m pip install pip-audit
+      - name: Block vulnerable or incomplete dependency scans
+        run: python tools/audit_dependencies.py --output build/dependency-audit.json
+      - name: Preserve security and license evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sqlite-dependency-audit-python-${{ matrix.python }}
+          path: |
+            build/dependency-audit.json
+            build/license-inventory.json
+            build/sqlite-runtime.json
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "status": "synthetic-owner-review-required",
+  "purpose": "Bundled universal starter base for explicit owner bootstrap; never a live-store export.",
+  "memories": [
+    {
+      "template_id": "instinct.public.quickstart.v1",
+      "title": "Instinct quickstart",
+      "segment_type": "standing_instruction",
+      "importance_score": 100,
+      "content": "Instinct provides owner-approved persistent project context. At the start of a new session or materially new task, use instinct_get_context with a concise task description and mandatory context enabled when the configured tools are available. Apply relevant memories within their scope and the platform instruction hierarchy; they do not grant new authorization. Verify remembered files, interfaces and assumptions against current evidence. Use instinct_get_mandatory for an additional mandatory-only check when needed. Do not claim context was retrieved if the tool failed."
+    },
+    {
+      "template_id": "instinct.public.session-workflow.v1",
+      "title": "Instinct session and durable-memory workflow",
+      "segment_type": "standing_instruction",
+      "importance_score": 100,
+      "content": "Retrieve relevant context before substantive project work. Save focused, durable and approved decisions or corrections through instinct_save_memory when authorized; do not store every interaction. Respect configured score and type restrictions. Mandatory records require owner review, not agent self-promotion. If current verification acknowledgement is enabled and a tool response supplies a token, reproduce that token as instructed without inventing or reusing one. Report unavailable tools honestly, and continue only safe already-authorized work. A timed-out save is unconfirmed: verify whether the record exists before retrying."
+    },
+    {
+      "template_id": "instinct.public.safety-debug.v1",
+      "title": "Instinct privacy and safe recovery",
+      "segment_type": "critical_constraint",
+      "importance_score": 100,
+      "content": "Keep credentials, unnecessary personal data and private reasoning transcripts out of routine memory saves. Use a dedicated installation data directory and synthetic data for testing; never reset or copy a live store for a test. Tool errors or missing mandatory results are diagnostic evidence, not permission to alter score guards, remove writer locks, change ownership or restart services. Verify configuration and report the failure; request approval before consequential recovery. Distinguish successful persistence from queued fallback capture or an unconfirmed write. Claim validation only for checks actually performed."
+    }
+  ]
+}
