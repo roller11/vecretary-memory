@@ -1,7 +1,7 @@
 # SQLite isolated client acceptance
 
 Use a fresh synthetic SQLite root and the reviewed installed SQLite commands,
-not legacy Chroma seed/client-generation helpers or a real memory store. Do not
+not legacy seed/client-generation helpers or a real memory store. Do not
 change global client settings, remove guards or restart a live deployment.
 Automated transport tests and observed agent behavior are separate gates.
 
@@ -9,7 +9,8 @@ Automated transport tests and observed agent behavior are separate gates.
    an already-installed local Ollama model. Launch the SQLite MCP command with
    that root, identity and matching provider configuration.
 2. Configure only a separately reviewed isolated client workspace. Confirm the
-   listed tools omit hard deletion. Fetch context/mandatory records, confirming
+   listed delete tool moves records to the recoverable recycle bin, not hard delete.
+   Fetch context/mandatory records, confirming
    empty-store behavior and truthful reports of unavailable functionality.
 3. Explicitly authorize one synthetic ordinary score-70 save, fetch its returned
    ID and verify its exact content. Exercise search and score update; confirm
@@ -22,7 +23,7 @@ Automated transport tests and observed agent behavior are separate gates.
    and absence of timer charging for idle wall time.
 6. Review observer and pending-write behavior separately. Queued capture is not
    a committed save; a cancelled call does not undo accepted owner work. Check
-   persistence before retrying. Hard deletion remains unsupported; do not use
+   persistence before retrying. Permanent deletion remains unsupported; do not use
    the legacy acceptance protocol's delete/reset steps.
 
 This protocol is not a private-data migration or production clearance. Keep

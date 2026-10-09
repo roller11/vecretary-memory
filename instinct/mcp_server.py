@@ -8,16 +8,12 @@ os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-import asyncio
 import logging
 import sys
 import json
 import math
-import threading
 import time
-from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from pathlib import Path
 from .privacy_logging import MCPPrivacyFormatter
 from .service_binding import bound_store, run_store_call
 
@@ -30,7 +26,6 @@ logger = logging.getLogger("instinct-mcp")
 
 try:
     from mcp.server import Server
-    from mcp.server.stdio import stdio_server
     from mcp import types
 except ImportError as e:
     logger.error("MCP SDK not installed")
@@ -50,50 +45,7 @@ except ImportError as e:
 
 
 def _probe_embedding_readiness() -> dict:
-    """Check the configured embedding provider with a small real embedding."""
-    try:
-        from .embedding_provider import get_embedding_provider
-        provider = get_embedding_provider()
-        if provider is None:
-            return {"ready": False, "error": "No embedding provider selected", "remediation": "Set CE_EMBEDDING_PROVIDERS=onnx or configure Ollama"}
-        vectors = provider.embed_query("Instinct embedding readiness")
-        from .provider_privacy import valid_query_embedding
-        ready = valid_query_embedding(vectors)
-        return {"ready": ready, "model_name": getattr(provider, "model_name", provider.name()), "base_url": getattr(provider, "base_url", "local"), "error": "Invalid or empty embedding" if not ready else None}
-    except Exception as error:
-        return {"ready": False, "error": f"Embedding probe failed ({type(error).__name__}); details withheld", "remediation": "Check embedding provider settings and model availability"}
-
-
-
-
-
-
-def _default_persist_dir() -> str:
-    """Return the standalone user data directory."""
-    from .runtime import default_data_dir
-    return default_data_dir()
-
-
-def get_instinct_store():
-    """Get the InstinctStore instance.
-
-    FALLBACK_STORE (removable): re-raise writer-lock failures instead of
-    swallowing them. Previously this returned None on ANY init failure,
-    which silently bypassed get_store()'s read-only fallback (the except
-    block there never saw an exception) and left every tool dead with
-    "initialization failed" during a lock outage. Lock failures are
-    transient and expected — get_store() handles them by re-initializing
-    read-only. All other exceptions still log and return None.
-    """
-    try:
-        from instinct.store import InstinctStore
-        persist_dir = _default_persist_dir()
-        return InstinctStore(persist_dir=persist_dir)
-    except Exception as e:
-        if "ChromaWriterLockUnavailable" in type(e).__name__ or "writer lock" in str(e).lower():
-            raise
-        logger.error("Failed to initialize InstinctStore")
-        return None
+    return {"ready": False, "error": "Embedding readiness is managed by the explicit SQLite service configuration."}
 
 
 
@@ -219,27 +171,10 @@ def _check_dedup(store, content: str, title: str) -> str | None:
 
 
 
-_shared_writer_enabled = False
 _backend_lifecycle = ContextVar('instinct_backend_lifecycle', default=None)
 
 
-@asynccontextmanager
-async def _connection_lifespan(connected_server):
-    from .mandatory_lifecycle import MandatoryLifecycle
-    client = None
-    if _shared_writer_enabled:
-        from .shared_writer import SharedWriterClient
-        client = SharedWriterClient(_default_persist_dir())
-    try:
-        yield {"mandatory_lifecycle": MandatoryLifecycle(), "shared_writer_client": client}
-    finally:
-        if client is not None:
-            import anyio
-            with anyio.CancelScope(shield=True):
-                await client.close()
-
-
-server = Server("instinct", lifespan=_connection_lifespan)
+server = Server("vecretary-sqlite-tools")
 
 
 def _connection_lifecycle():
@@ -248,13 +183,6 @@ def _connection_lifecycle():
         return backend
     try:
         return server.request_context.lifespan_context.get("mandatory_lifecycle")
-    except LookupError:
-        return None
-
-
-def _connection_client():
-    try:
-        return server.request_context.lifespan_context.get('shared_writer_client')
     except LookupError:
         return None
 
@@ -388,13 +316,13 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="instinct_delete_memory",
-            description="Delete a memory segment by ID. Use instinct_search first to find the ID of the segment to delete.",
+            description="Move a memory to the recoverable recycle bin. This does not permanently delete it; restore it from the dashboard recycle bin. Owner-only records cannot be recycled by agent tools.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "segment_id": {
                         "type": "string",
-                        "description": "The ID of the segment to delete"
+                        "description": "The exact ID of the memory to move to the recycle bin"
                     }
                 },
                 "required": ["segment_id"]
@@ -476,46 +404,29 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     except ValueError:
         return [types.TextContent(type='text', text='Error: invalid tool arguments or unknown tool; nothing executed.')]
 
-    client = _connection_client()
-    if _shared_writer_enabled and client is None:
-        return [types.TextContent(type='text', text='Error: Shared-writer connection context is unavailable; no local store was opened.')]
-    if client is not None:
-        try:
-            return await client.call(name, arguments)
-        except Exception:
-            logger.error('Shared writer request failed: %s', log_name)
-            return [types.TextContent(type='text', text='Error: Shared writer unavailable or response unconfirmed. Check private runtime permissions, matching provider settings and writer ownership. Do not retry writes until their persistence is checked; no locks or guards were changed.')]
-
-
-
     try:
         store = bound_store()
-        if store is None:
-            store = await asyncio.get_event_loop().run_in_executor(None, get_store)
-        if not store:
-            logger.error("InstinctStore not available - initialization failed")
-            return [types.TextContent(
-                type="text",
-                text="Error: InstinctStore initialization failed. Check server logs for details."
-            )]
-    except Exception as e:
-        logger.error("Store initialization failed on tool call: %s", log_name)
+    except Exception:
+        logger.error("SQLite service binding unavailable for tool call: %s", log_name)
         return [types.TextContent(
             type="text",
-            text="Error: Failed to initialize Instinct context store. Check private storage permissions, dependencies and provider settings; exception details withheld."
+            text="Error: SQLite service binding unavailable; nothing was read or written.",
+        )]
+    if store is None:
+        logger.error("SQLite service binding missing for tool call: %s", log_name)
+        return [types.TextContent(
+            type="text",
+            text="Error: No SQLite service is bound; nothing was read or written. Start the explicit vecretary-mcp service."
         )]
 
-    if bound_store() is store:
-        if name == 'instinct_delete_memory':
-            return [types.TextContent(type='text', text='Error: Hard deletion is disabled in the experimental SQLite service; no queued write was created.')]
-        if store._read_only and name in ('instinct_save_memory', 'instinct_update_score'):
-            if getattr(store, 'queue_writes', False):
-                try:
-                    from .sqlite_pending import capture_call
-                    return [types.TextContent(type='text', text=capture_call(store, name, arguments))]
-                except Exception:
-                    return [types.TextContent(type='text', text='Error: SQLite fallback capture unconfirmed; inspect the private pending queue and committed records before retrying. The observer did not write the database; queued replay may still occur.')]
-            return [types.TextContent(type='text', text='Error: SQLite observer is read-only; no queued write was created.')]
+    if store._read_only and name in ('instinct_save_memory', 'instinct_update_score', 'instinct_delete_memory'):
+        if getattr(store, 'queue_writes', False):
+            try:
+                from .sqlite_pending import capture_call
+                return [types.TextContent(type='text', text=capture_call(store, name, arguments))]
+            except Exception:
+                return [types.TextContent(type='text', text='Error: SQLite fallback capture unconfirmed; inspect the private pending queue and committed records before retrying. The observer did not write the database; queued replay may still occur.')]
+        return [types.TextContent(type='text', text='Error: SQLite observer is read-only; no queued write was created.')]
 
     try:
 
@@ -523,23 +434,34 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             from instinct.nudge import tick_nudge_session
             from instinct.dormancy import DormancyConfig, _cfg as _dorm_cfg
             idle_min = float(_dorm_cfg().session_idle_minutes)
-            if bound_store() is not store or not store._read_only:
+            if not store._read_only:
                 tick_nudge_session(store, idle_minutes=idle_min)
         except Exception:
             logger.error("Session tick failed (non-fatal)")
-            if bound_store() is store:
-                raise
+            raise
 
 
 
 
         try:
             from instinct import tick_turn, apply_nudge_check
-            if bound_store() is not store or not store._read_only:
+            if not store._read_only:
                 tick_turn(store)
         except Exception:
             logger.error("Nudge tick failed (non-fatal)")
-            if bound_store() is store:
+            raise
+
+
+
+
+
+
+        if name in ("instinct_get_context", "instinct_get_mandatory") and not store._read_only:
+            try:
+                from instinct import apply_nudge_check
+                apply_nudge_check(store)
+            except Exception:
+                logger.error("Nudge check failed (non-fatal)")
                 raise
 
 
@@ -547,49 +469,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
 
 
-        if name in ("instinct_get_context", "instinct_get_mandatory") and (bound_store() is not store or not store._read_only):
-            try:
-                from instinct import apply_nudge_check
-                apply_nudge_check(store)
-            except Exception:
-                logger.error("Nudge check failed (non-fatal)")
-                if bound_store() is store:
-                    raise
 
 
-
-
-
-
-
-
-
-        try:
-            import time as _time
-            _now = _time.monotonic()
-            if bound_store() is None and _now - getattr(call_tool, "_last_fb_sync_check", 0.0) >= 60.0:
-                call_tool._last_fb_sync_check = _now
-
-
-
-
-
-                try:
-                    _try_upgrade_to_write(store)
-                except Exception:
-                    logger.error("Store upgrade check failed (non-fatal)")
-                if not getattr(store, "_read_only", True):
-                    from instinct.fallback_store import (
-                        pending_count, sync_pending,
-                    )
-                    if pending_count() > 0:
-                        _fb_stats = sync_pending(store)
-                        if _fb_stats.get("synced") or _fb_stats.get("failed"):
-                            logger.info(
-                                "Fallback periodic sync completed"
-                            )
-        except Exception:
-            logger.error("Fallback periodic sync failed (non-fatal)")
 
         lifecycle = _connection_lifecycle()
         if arguments.get("new_session", False):
@@ -603,7 +484,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             if not renewed and name in ("instinct_get_context", "instinct_get_mandatory"):
                 return [types.TextContent(
                     type="text",
-                    text="Error: Mandatory renewal pending: store is read-only. Retry after owner-approved writer handoff; no locks or guards were changed.",
+                    text="Error: Mandatory renewal is pending until an owner SQLite service can write it.",
                 )]
 
         if name == "instinct_get_context":
@@ -738,35 +619,7 @@ async def _handle_save_memory(store, arguments: dict) -> list[types.TextContent]
 
 
 
-    try:
-        segment_id = store.add(scored)
-    except RuntimeError as ro_err:
-        if "read-only" in str(ro_err).lower():
-            from instinct.fallback_store import write_pending
-            fb_path = write_pending(
-                "save_memory",
-                persist_dir=getattr(store, "persist_dir", None),
-                content=content,
-                title=title,
-                importance_score=importance,
-                segment_type=seg_type_str,
-                reasoning="Saved via MCP tool",
-            )
-            logger.warning(
-                "Store read-only; save captured to fallback"
-            )
-            return [types.TextContent(
-                type="text",
-                text=(
-                    f"⚠ Saved to FALLBACK (store read-only — writer lock held "
-                    f"by another process).\n"
-                    f"Pending file: {os.path.basename(fb_path)}\n"
-                    f"Title: {title}\nImportance: {importance}\n"
-                    f"This memory will sync into Instinct automatically when "
-                    f"the writer lock returns to MCP."
-                )
-            )]
-        raise
+    segment_id = store.add(scored)
 
 
 
@@ -908,71 +761,6 @@ async def _handle_get(store, arguments: dict) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=text)]
 
 
-async def _handle_delete_memory(store, arguments: dict) -> list[types.TextContent]:
-    """Handle instinct_delete_memory tool."""
-    segment_id = arguments.get("segment_id", "")
-
-    if not segment_id:
-        return [types.TextContent(type="text", text="Error: segment_id is required")]
-
-
-    segment = store.get(segment_id)
-    if not segment:
-        return [types.TextContent(
-            type="text",
-            text=f"Error: No segment found with ID '{segment_id}'"
-        )]
-
-    from .write_policy import agent_target_error
-    authority_error = agent_target_error(segment)
-    if authority_error:
-        return [types.TextContent(type="text", text=f"BLOCKED: {authority_error}")]
-    title = segment.concept_title
-    score = segment.importance_score
-
-
-
-
-
-    try:
-        success = store.delete(segment_id)
-    except RuntimeError as ro_err:
-        if "read-only" in str(ro_err).lower():
-            from instinct.fallback_store import write_pending
-            fb_path = write_pending(
-                "delete_memory",
-                persist_dir=getattr(store, "persist_dir", None)
-                or _default_persist_dir(),
-                delete_id=segment_id,
-            )
-            logger.warning(
-                "Store read-only; delete captured to fallback"
-            )
-            return [types.TextContent(
-                type="text",
-                text=(
-                    f"⚠ Delete saved to FALLBACK (store read-only).\n"
-                    f"Pending file: {os.path.basename(fb_path)}\n"
-                    f"ID: {segment_id}\nTitle: {title}\n"
-                    f"Will be deleted from Instinct when the writer lock "
-                    f"returns to MCP."
-                )
-            )]
-        raise
-
-    if success:
-        logger.info("Segment deleted")
-        return [types.TextContent(
-            type="text",
-            text=f"Deleted segment\nID: {segment_id}\nTitle: {title}\nWas score: {score}"
-        )]
-    else:
-        return [types.TextContent(
-            type="text",
-            text=f"Error: Failed to delete segment '{segment_id}'"
-        )]
-
-
 async def _handle_update_score(store, arguments: dict) -> list[types.TextContent
 ]:
     """Handle instinct_update_score tool."""
@@ -1005,36 +793,7 @@ async def _handle_update_score(store, arguments: dict) -> list[types.TextContent
         return [types.TextContent(type="text", text=f"BLOCKED: {authority_error}")]
     old_score = segment.importance_score
     title = segment.concept_title
-
-
-
-
-    try:
-        success = store.update_score(segment_id, new_score, reason)
-    except RuntimeError as ro_err:
-        if "read-only" in str(ro_err).lower():
-            from instinct.fallback_store import write_pending
-            fb_path = write_pending(
-                "update_score",
-                persist_dir=getattr(store, "persist_dir", None),
-                segment_id=segment_id,
-                new_score=new_score,
-                score_reason=reason,
-            )
-            logger.warning(
-                "Store read-only; update_score captured to fallback"
-            )
-            return [types.TextContent(
-                type="text",
-                text=(
-                    f"⚠ Score update saved to FALLBACK (store read-only).\n"
-                    f"Pending file: {os.path.basename(fb_path)}\n"
-                    f"ID: {segment_id}\nTitle: {title}\n"
-                    f"Score: {old_score} -> {new_score}\nReason: {reason}\n"
-                    f"Will sync when the writer lock returns to MCP."
-                )
-            )]
-        raise
+    success = store.update_score(segment_id, new_score, reason)
 
     if success:
         logger.info("Segment score updated")
@@ -1053,213 +812,42 @@ async def _handle_update_score(store, arguments: dict) -> list[types.TextContent
 
 
 
-_store = None
-_store_init_error = None
-_store_lock = threading.Lock()
-
-
-
-
-_UPGRADE_RETRY_SECONDS = 60.0
-
-
-def _try_upgrade_to_write(store) -> bool:
-    """Attempt to upgrade a read-only store to write mode.
-
-    FALLBACK_STORE (removable): closes the "stuck read-only" gap. Once
-    the store initialized read-only (writer lock held elsewhere), it was
-    cached forever — the periodic sync guard skipped it, so pending
-    fallback files never replayed until an MCP restart, even after the
-    dashboard released the lock via "Back to MCP".
-
-    Strategy: cheap non-blocking probe (is_writer_lock_held). If the
-    lock is free, build a fresh WRITE-mode store, swap it in as the
-    global, and replay pending fallback files. On any failure the
-    original read-only store stays active — this function never raises.
-
-    Returns True if the store was upgraded.
-    """
-    if not getattr(store, "_read_only", False):
-        return False
-
-    persist_dir = getattr(store, "persist_dir", None) or _default_persist_dir()
-
-    try:
-        from instinct.chroma_writer_lock import is_writer_lock_held
-        if is_writer_lock_held(persist_dir):
-            return False
-    except Exception:
-        return False
-
-
-
-    try:
-        from instinct.store import InstinctStore
-        new_store = InstinctStore(persist_dir=persist_dir, read_only=False)
-    except Exception as e:
-        logger.warning(
-            "Read-only upgrade attempt failed (lock may have been re-taken)"
-        )
-        return False
-
-
-
-
-    global _store
-    _store = new_store
-    logger.info("Store upgraded: read-only -> WRITE mode (lock acquired)")
-
-
-    try:
-        from instinct.fallback_store import sync_pending
-        sync_stats = sync_pending(new_store, persist_dir=persist_dir)
-        if sync_stats.get("synced") or sync_stats.get("failed"):
-            logger.info("Fallback sync after upgrade completed")
-    except Exception as fb_err:
-        logger.warning("Fallback sync after upgrade skipped")
-
-    return True
+async def _handle_delete_memory(store, arguments: dict) -> list[types.TextContent]:
+    segment_id = arguments.get('segment_id', '')
+    if not isinstance(segment_id, str) or not segment_id:
+        return [types.TextContent(type='text', text='Error: segment_id is required')]
+    segment = store.get(segment_id)
+    if segment is None:
+        return [types.TextContent(type='text', text=f"Error: No segment found with ID '{segment_id}'")]
+    from .write_policy import agent_target_error
+    authority_error = agent_target_error(segment)
+    if authority_error:
+        return [types.TextContent(type='text', text=f'BLOCKED: {authority_error}')]
+    if store.is_recycled(segment_id):
+        return [types.TextContent(type='text', text='Memory is already in the recoverable recycle bin.')]
+    if store.recycle(segment_id, by='agent', reason='Recycled via MCP request') is None:
+        return [types.TextContent(type='text', text=f"Error: Failed to recycle segment '{segment_id}'")]
+    return [types.TextContent(
+        type='text',
+        text=f'Recycled memory segment\nID: {segment_id}\nIt is in the recoverable recycle bin; restore it from the dashboard.',
+    )]
 
 
 def get_store():
-    """Get the InstinctStore instance (lazy init, cached, thread-safe).
-
-    FAILSAFE: if the writer lock is unavailable (another process holds it),
-    falls back to read-only mode instead of returning None. This means the
-    MCP server can still serve get_context, get_mandatory, and search calls
-    even when the dashboard or API server is the active writer. Write tools
-    (save_memory, update_score, delete) will raise a clear error.
-    """
-    global _store, _store_init_error
-    if _store is not None:
-        return _store
+    store = bound_store()
+    if store is None:
+        raise RuntimeError('MCP storage must be bound by the explicit SQLite service.')
+    return store
 
 
 
 
-
-
-    if _store_init_error:
-        if "writer lock" in _store_init_error.lower() or "ChromaWriterLockUnavailable" in _store_init_error:
-            logger.warning(
-                "Previous init failure was transient (writer lock). "
-                "Retrying store initialization."
-            )
-            _store_init_error = None
-        else:
-            logger.error("Store init failed previously")
-            return None
-    with _store_lock:
-
-        if _store is not None:
-            return _store
-        if _store_init_error:
-            return None
-        logger.info("Initializing InstinctStore (first access)...")
-        try:
-            _store = get_instinct_store()
-            logger.info("InstinctStore initialized successfully (read-write)")
-
-
-
-
-
-            try:
-                from instinct.fallback_store import sync_pending
-                sync_stats = sync_pending(
-                    _store,
-                    persist_dir=_default_persist_dir(),
-                )
-                if sync_stats.get("synced") or sync_stats.get("failed"):
-                    logger.info(
-                        "Fallback sync on lock-acquire completed"
-                    )
-            except Exception as fb_err:
-                logger.warning("Fallback sync skipped (non-fatal)")
-        except Exception as e:
-
-
-            err_msg = str(e)
-            if "writer lock" in err_msg.lower() or "ChromaWriterLockUnavailable" in type(e).__name__:
-                logger.warning(
-                    "Writer lock unavailable. Falling back to READ-ONLY mode. "
-                    "Write tools may queue pending operations; read tools work normally."
-                )
-                try:
-                    from instinct.store import InstinctStore
-                    persist_dir = _default_persist_dir()
-                    _store = InstinctStore(persist_dir=persist_dir, read_only=True)
-                    logger.info("InstinctStore initialized in READ-ONLY mode")
-                except Exception as ro_err:
-                    _store_init_error = str(ro_err)
-                    logger.error("Failed to init read-only store")
-                    return None
-            else:
-                _store_init_error = err_msg
-                logger.error("Failed to initialize InstinctStore")
-                return None
-    return _store
-
-
-
-
-
-
-async def main():
-    """Run the MCP server with stdio transport."""
-    logger.info("Starting Instinct MCP Server")
-
-
-
-
-
-    try:
-        readiness = {"ready": True} if _shared_writer_enabled else await asyncio.get_event_loop().run_in_executor(
-            None, _probe_embedding_readiness
-        )
-        if _shared_writer_enabled:
-            logger.info('Shared-writer proxy initialized; provider readiness deferred to backend')
-        elif readiness.get("ready"):
-            logger.info(
-                "Embedding ready"
-            )
-        else:
-            logger.warning(
-                "Embedding NOT ready. Check provider settings and model availability. "
-                "Save operations will fail until this is resolved."
-            )
-    except Exception as e:
-        logger.warning("Embedding readiness probe failed")
-
-    try:
-        async with stdio_server() as (read_stream, write_stream):
-            logger.info("MCP stdio transport initialized")
-            logger.info("Ready to accept tool calls (store warming up in background)")
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options()
-            )
-    except Exception as e:
-        logger.error("MCP server error")
-        raise
 
 
 def cli():
-    """Launch the MCP server from the installed console script."""
-    import argparse
-    parser = argparse.ArgumentParser(description="Vecretary Memory stdio MCP server")
-    parser.add_argument("--data-dir", help="Memory data directory (overrides environment)")
-    parser.add_argument("--shared-writer", action="store_true", help="Linux/WSL: route chat connections through one private writer backend")
-    arguments = parser.parse_args()
-    global _shared_writer_enabled
-    _shared_writer_enabled = arguments.shared_writer
-    if _shared_writer_enabled:
-        from .shared_writer import require_linux
-        require_linux()
-    if arguments.data_dir:
-        os.environ["INSTINCT_DATA_DIR"] = arguments.data_dir
-    asyncio.run(main())
+    """Compatibility alias for the explicitly configured SQLite command."""
+    from .sqlite_service import cli as sqlite_cli
+    return sqlite_cli()
 
 
 if __name__ == "__main__":

@@ -42,4 +42,4 @@ Recommended engineering separation: keep premium implementation in new files
 in Wisdom, use public contracts, and review any modifications to Vecretary Memory
 separately. Repository separation alone is not legal clearance or assurance of
 ownership of product names. Dependencies retain their own licenses; MPL-2.0
-does not relicense Chroma or other third-party code.
+does not relicense bundled third-party code or change dependency licenses.

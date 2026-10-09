@@ -20,7 +20,6 @@ from .models import (
 )
 from .scorer import SegmentScorer, score_segment
 from .retriever import PriorityRetriever, get_context
-from .store import InstinctStore
 from .mirror import ConversationMirror
 from .modifiers import (
     ScoreModifier,
@@ -99,11 +98,10 @@ WisdomPop = PopResult          # alias: the pop rule result
 
 
 def _default_persist_dir() -> str:
-    """Resolve the default Instinct persist dir without importing store.py
-    (avoids a cycle: store.py imports dormancy via dummies for type hints
-    is fine, but we want the path without paying the Chroma init cost)."""
+    """Resolve the default Instinct persist dir without importing a backend."""
     from .runtime import default_data_dir
     return default_data_dir()
+
 
 # Lazy imports for optional dependencies
 def get_mcp_tools():
@@ -133,8 +131,6 @@ __all__ = [
     # Retriever
     "PriorityRetriever",
     "get_context",
-    # Store
-    "InstinctStore",
     # Mirror
     "ConversationMirror",
     # Modifier Pipeline

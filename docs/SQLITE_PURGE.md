@@ -1,7 +1,7 @@
 # Experimental SQLite single-record purge
 
 This is an explicit owner-only API capability for an isolated SQLite runtime,
-not a live migration or default behavior. Agent deletion, bulk purge, reset,
+not a live migration or default behavior. Permanent agent deletion, bulk purge, reset,
 automatic handoff and legacy queue conversion remain disabled.
 
 ## Enable and confirm
@@ -24,9 +24,10 @@ returns `purged: false`; a committed deletion returns `purged: true`.
 
 This slice does not adapt the legacy dashboard purge buttons to send the extra
 confirmation field. Those buttons fail closed instead of deleting a record.
-The MCP tool list still excludes `instinct_delete_memory`, and direct attempted
-agent deletion is refused even when owner purge is enabled. There is no agent
-fallback capture for deletion.
+The MCP `instinct_delete_memory` tool only moves eligible records into the
+recoverable recycle bin; it cannot invoke permanent purge. An opted-in observer
+may queue that soft-recycle operation, but pending replay never grants purge
+authority. Owner-only purge still requires the explicit confirmation above.
 
 ## Queue and transaction safety
 
@@ -59,7 +60,8 @@ Synthetic tests cover opt-in/default refusal, observer refusal, exact confirmati
 authenticated HTTP boundaries, recycle-first policy, record/clock isolation,
 pending-file and guard refusal, transaction rollback, restart, and pre/post-purge
 backup restoration. They do not authorize deleting real private memories or
-certify every power-loss window. `runtime_ready=false` and Chroma defaults remain.
+certify every power-loss window. `runtime_ready=false` remains; the SQLite
+service does not expose bulk reset or legacy backend selection.
 
 See [service integration](SQLITE_SERVICE_INTEGRATION.md),
 [pending writes](SQLITE_PENDING_WRITES.md) and

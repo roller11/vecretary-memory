@@ -1,7 +1,7 @@
 # Experimental SQLite offline backup
 
 This is an opt-in API for a stopped, isolated, single-collection SQLite runtime.
-It is not a live Chroma migration command or a dashboard backup endpoint.
+It is not a live database migration command or a dashboard backup endpoint.
 The default runtime remains unchanged and `runtime_ready` remains false.
 
 A verified snapshot can feed the [offline queue-review tool](SQLITE_QUEUE_REVIEW.md).
@@ -73,4 +73,5 @@ File flushes and directory rename are not a tested power-loss durability protoco
 
 Synthetic round-trip and failure tests accompany the API. Private real-provider
 acceptance is separate evidence; it does not certify arbitrary model identifiers,
-large workloads, all crash windows or a Chroma-free distribution.
+large workloads, all crash windows or complete distribution independence from
+native libraries.

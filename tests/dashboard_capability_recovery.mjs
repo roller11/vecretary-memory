@@ -6,11 +6,29 @@ const {script, scenario} = JSON.parse(readFileSync(0, 'utf8'));
 const calls = [];
 let heartbeatCount = 0;
 let sessionCount = 0;
+let domReadyHandler = null;
+let preferenceChangeHandler = null;
+const preferenceValues = new Map(scenario === 'read_only' ? [['instinct:preferReadOnly', '1']] : []);
+const readOnlyPreference = {
+  checked: false,
+  addEventListener(event, handler) {
+    if (event === 'change') preferenceChangeHandler = handler;
+  },
+};
 const context = vm.createContext({
   URL, Headers, Response,
+  setInterval() { return 1; },
   location: {href: 'http://127.0.0.1:9876/', origin: 'http://127.0.0.1:9876'},
-  document: {addEventListener() {}, querySelectorAll() { return []; }},
-  localStorage: {getItem() { return scenario === 'read_only' ? '1' : null; }},
+  document: {
+    addEventListener(event, handler) { if (event === 'DOMContentLoaded') domReadyHandler = handler; },
+    querySelectorAll() { return []; },
+    getElementById(id) { return id === 'instinct-prefer-readonly' ? readOnlyPreference : null; },
+  },
+  localStorage: {
+    getItem(key) { return preferenceValues.get(key) ?? null; },
+    setItem(key, value) { preferenceValues.set(key, String(value)); },
+    removeItem(key) { preferenceValues.delete(key); },
+  },
   async fetch(path, options = {}) {
     const headers = new Headers(options.headers);
     calls.push({path, options, capability: headers.get('X-Instinct-Capability')});
@@ -24,6 +42,7 @@ const context = vm.createContext({
       return Response.json({capability: scenario === 'invalid_capability' ? 123 : 'synthetic-renewed'},
         {status: scenario === 'bootstrap_denied' ? 403 : 200});
     }
+    if (path === '/api/mode') return Response.json({read_only: false});
     assert.equal(new URL(path, context.location.href).origin, context.location.origin);
     if (path === '/api/heartbeat') {
       heartbeatCount += 1;
@@ -42,8 +61,21 @@ if (scenario === 'cross_origin') {
   await assert.rejects(invoke("dashboardFetch('https://attacker.example/api/heartbeat', {method:'POST'})"), /Cross-origin/);
   assert.equal(calls.length, 0);
 } else if (scenario === 'read_only') {
+  await domReadyHandler();
+  assert.equal(readOnlyPreference.checked, true);
   await assert.rejects(invoke("dashboardFetch('/api/add', {method:'POST'})"), /Read-only/);
-  assert.equal(calls.length, 0);
+  assert.equal(calls.some(call => call.path === '/api/add'), false);
+} else if (scenario === 'preference_toggle') {
+  await domReadyHandler();
+  assert.equal(readOnlyPreference.checked, false);
+  readOnlyPreference.checked = true;
+  preferenceChangeHandler();
+  assert.equal(preferenceValues.get('instinct:preferReadOnly'), '1');
+  assert.equal(invoke('instinctCanWrite()'), false);
+  readOnlyPreference.checked = false;
+  preferenceChangeHandler();
+  assert.equal(preferenceValues.has('instinct:preferReadOnly'), false);
+  assert.equal(invoke('instinctCanWrite()'), true);
 } else if (scenario === 'edit_denied' || scenario === 'get_denied') {
   const response = await invoke(scenario === 'edit_denied' ? "dashboardFetch('/api/add', {method:'POST', body:'{}'})" : "dashboardFetch('/api/heartbeat')");
   assert.equal(response.status, 403);

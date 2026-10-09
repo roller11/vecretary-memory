@@ -27,7 +27,7 @@ IDENTIFIER_STOPWORDS = {
 
 # Recycle bin: soft-delete marker. Segments with a `recycled_at` ISO
 # timestamp are hidden from the default list / search / retriever, but
-# remain in chroma and can be restored via the dashboard's "Recycle
+# remain in the record store and can be restored via the dashboard's "Recycle
 # bin" view. This is the safe alternative to hard `delete()` — every
 # accidental wipe is reversible. The MCP server does not see recycled
 # segments unless explicitly opted in (the dashboard's `include_recycled=1`
@@ -56,7 +56,7 @@ def normalize_identifier(identifier: str) -> str:
 
 
 def serialize_memory_identifiers(identifiers: List[str]) -> str:
-    """Serialize identifiers for Chroma metadata storage."""
+    """Serialize identifiers for storage metadata."""
     return IDENTIFIER_DELIMITER.join(identifiers)
 
 

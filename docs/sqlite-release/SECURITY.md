@@ -1,9 +1,9 @@
 # SQLite alpha security policy
 
 This profile uses Python's SQLite binding and explicit local Ollama embeddings.
-Chroma and its patched wheel are not installation dependencies; no Chroma HTTP
-server or database network listener is launched. The optional loopback browser
-dashboard is a separate application interface, not a database server.
+No external vector-store library, native vector-store wheel or database HTTP
+server is installed or launched. The optional loopback browser dashboard is an
+application interface, not a database server.
 
 The runtime retains database schema/identity validation, finite bounded vectors,
 disabled SQLite extension loading and trusted schema, parameterized queries,
@@ -32,8 +32,8 @@ version, source ID, compile options and linkage with the supplied
 `tools/collect_sqlite_runtime.py` before assessing advisories. The collector
 uses only an in-memory database and does not certify security. Distribution
 backports require exact package/build evidence, not just an upstream version.
-Removing Chroma from this profile does not repair the legacy Chroma installation
-or guarantee this software is free of vulnerabilities. Actual-provider acceptance,
+Removing the legacy storage implementation from this profile does not repair an
+older installation or guarantee this software is free of vulnerabilities. Actual-provider acceptance,
 crash recovery and final publication review remain required.
 
 Report privately to security@raw-wire.com with version, interface, expected

@@ -33,7 +33,7 @@ def test_no_parent_traversal(tmp_path):
 
 
 def test_application_state_files_use_private_storage(tmp_path):
-    from instinct import dormancy, nudge, seed, session_timer
+    from instinct import dormancy, nudge, session_timer
 
     root = ensure_private_directory(tmp_path / 'data')
     nudge._save_turn_state(str(root), {'current_turn': 2, 'last_tick_at': None})
@@ -41,11 +41,10 @@ def test_application_state_files_use_private_storage(tmp_path):
     configuration.save(dormancy.DormancyConfig())
     timer = session_timer._SessionStore(root)
     timer.save(session_timer.SessionState(None, None, 0.0))
-    seed.write_marker(root, root / seed.MARKER_NAME, {'synthetic': True})
     assert nudge._load_turn_state(str(root))['current_turn'] == 2
     assert dormancy._ConfigStore(root).load().mandatory == configuration.load().mandatory
     assert session_timer._SessionStore(root).load() == timer.load()
-    assert len(list(root.iterdir())) == 4
+    assert len(list(root.iterdir())) == 3
     if os.name == 'posix':
         assert all(path.stat().st_mode & 0o777 == 0o600 for path in root.iterdir())
 
@@ -131,49 +130,26 @@ def test_symlink_ancestors_files_and_hardlinks_are_refused(tmp_path):
     assert original.read_text() == 'untouched'
 
 
-def test_reset_dry_run_creates_no_backup(tmp_path, monkeypatch):
+def test_dashboard_reset_refusal_never_touches_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, 'PERSIST_DIR', str(tmp_path))
-    store = Mock()
-    store.list_recycled.return_value = []
-    store.get_by_score.return_value = []
-    store.count.return_value = 0
-    monkeypatch.setattr(dashboard, 'get_store', lambda: store)
+    before = {path.relative_to(tmp_path): path.read_bytes()
+              for path in tmp_path.rglob('*') if path.is_file()}
     result = dashboard.admin_reset(dry_run=True)
+    assert result['code'] == 501
     assert result['dry_run'] is True
-    assert not (tmp_path / 'backups').exists()
-    store.delete.assert_not_called()
+    assert {path.relative_to(tmp_path): path.read_bytes()
+            for path in tmp_path.rglob('*') if path.is_file()} == before
 
 
-def test_reset_snapshots_are_private_and_never_removed_automatically(tmp_path, monkeypatch):
+def test_dashboard_reset_refuses_legacy_database_without_copying_it(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, 'PERSIST_DIR', str(tmp_path))
-    (tmp_path / 'chroma.sqlite3').write_bytes(b'Synthetic database fixture, not SQLite')
-    store = Mock()
-    store.list_recycled.return_value = []
-    store.get_by_score.return_value = []
-    store.count.return_value = 0
-    monkeypatch.setattr(dashboard, 'get_store', lambda: store)
+    legacy_database = tmp_path / 'legacy-vector.sqlite'
+    legacy_database.write_bytes(b'Synthetic legacy database fixture')
     first = dashboard.admin_reset()
     second = dashboard.admin_reset()
-    assert first['ok'] and second['ok']
-    assert first['backup_chroma'] != second['backup_chroma']
-    for result in (first, second):
-        for key in ('backup_chroma', 'backup_recycle'):
-            path = Path(result[key])
-            assert path.exists()
-            if os.name == 'posix':
-                assert path.stat().st_mode & 0o777 == 0o600
-    if os.name == 'posix':
-        assert (tmp_path / 'backups').stat().st_mode & 0o777 == 0o700
-
-
-@pytest.mark.skipif(os.name != 'posix', reason='POSIX permissions')
-def test_unsafe_recovery_marker_is_preserved(tmp_path, monkeypatch):
-    marker = tmp_path / 'owner-marker.json'
-    marker.write_text('owner marker')
-    marker.chmod(0o644)
-    monkeypatch.setattr(dashboard, 'RECOVERY_FILE', marker)
-    dashboard._clear_recovery()
-    assert marker.read_text() == 'owner marker'
+    assert first['code'] == second['code'] == 501
+    assert legacy_database.read_bytes() == b'Synthetic legacy database fixture'
+    assert not (tmp_path / 'backups').exists()
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX ownership')
@@ -192,16 +168,16 @@ def test_foreign_ownership_is_refused_without_chown(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX permissions')
-def test_store_refuses_exposed_directory_before_chroma_or_locks(tmp_path, monkeypatch):
-    from instinct import store
+def test_sqlite_session_refuses_exposed_directory_before_database_or_lock(tmp_path):
+    from instinct.sqlite_records import EmbeddingIdentity
+    from instinct.sqlite_session import SQLiteRuntimeSession
+
     root = tmp_path / 'data'
     root.mkdir(mode=0o755)
     root.chmod(0o755)
-    persistent = Mock()
-    monkeypatch.setattr(store.chromadb, 'PersistentClient', persistent)
-    monkeypatch.setattr(store, '_smoke_test_client', None, raising=False)
     with pytest.raises(PermissionError):
-        store.InstinctStore(persist_dir=str(root))
-    persistent.assert_not_called()
-    assert not (root / '.writer.lock').exists()
+        SQLiteRuntimeSession.open(root / 'sqlite', EmbeddingIdentity('synthetic', 'fixed', 2, 'cosine'),
+                                  persist_dir=root, read_only=False)
+    assert not (root / '.sqlite.runtime.lock').exists()
+    assert not (root / 'sqlite').exists()
     assert root.stat().st_mode & 0o777 == 0o755

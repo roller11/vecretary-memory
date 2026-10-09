@@ -14,10 +14,9 @@ import hashlib
 import re
 import time
 import threading
+from importlib import resources
 from datetime import datetime
-from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 
@@ -30,12 +29,10 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from instinct.store import InstinctStore
 from instinct.models import ScoredSegment, Segment, SegmentType, parse_tag_list
 from instinct.retriever import PriorityRetriever
 import instinct as _instinct_mod
 
-PERSIST_DIR = default_data_dir()
 HOST = "127.0.0.1"
 MAX_JSON_BYTES = 1024 * 1024
 JSON_READ_TIMEOUT_SECONDS = 5.0
@@ -142,29 +139,7 @@ def _validated_post_fields(data):
 
 
 PORT = int(os.environ.get("INSTINCT_PORT") or os.environ.get("CE_PORT", "8765"))
-
-
-
-
-
-
-
-
-
-
-
-
-_store: InstinctStore | None = None
-_retriever: PriorityRetriever | None = None
-_store_transition_lock = threading.RLock()
-
-
-def _serialized_store_transition(operation):
-    @wraps(operation)
-    def serialized(*args, **kwargs):
-        with _store_transition_lock:
-            return operation(*args, **kwargs)
-    return serialized
+PERSIST_DIR = default_data_dir()
 
 
 
@@ -190,59 +165,34 @@ def _serialized_store_transition(operation):
 
 
 
-HEARTBEAT_TIMEOUT_S = 30.0
-HEARTBEAT_CHECK_INTERVAL_S = 5.0
-RECOVERY_FILE = Path(PERSIST_DIR) / ".dashboard_recovery.json"
-
-_heartbeat_lock = threading.Lock()
-_last_heartbeat: float = 0.0
-_in_write_session: bool = False
-_watchdog_thread: threading.Thread | None = None
 
 
-@_serialized_store_transition
-def get_store() -> InstinctStore:
+
+
+
+
+
+
+
+
+
+
+
+
+
+def get_store():
     isolated = bound_store()
-    if isolated is not None:
-        return isolated
-    global _store
-    if _store is None:
-        from instinct import configure_dormancy
-        from instinct.chroma_writer_lock import ChromaWriterLockUnavailable
-        configure_dormancy(PERSIST_DIR)
-        try:
-            _store = InstinctStore(persist_dir=PERSIST_DIR, read_only=False)
-            print(f"[dashboard] running in WRITE mode (lock held)", file=sys.stderr)
-        except ChromaWriterLockUnavailable as e:
+    if isolated is None:
+        raise RuntimeError('Dashboard storage is available only inside the SQLite service.')
+    return isolated
 
 
-
-
-            print(
-                f"[dashboard] WRITER lock held by pid={e.holder_pid} "
-                f"(waited {e.waited:.1f}s). Falling back to READ-ONLY mode. "
-                f"MCP server or another process is the writer; writes are disabled.",
-                file=sys.stderr,
-            )
-            _store = InstinctStore(persist_dir=PERSIST_DIR, read_only=True)
-    return _store
-
-
-@_serialized_store_transition
 def get_retriever() -> PriorityRetriever:
-    isolated = bound_store()
-    if isolated is not None:
-        return PriorityRetriever(isolated)
-    global _retriever
-    if _retriever is None:
-        _retriever = PriorityRetriever(get_store())
-    return _retriever
+    return PriorityRetriever(get_store())
 
 
 def is_read_only() -> bool:
-    """True if the dashboard's store is in read-only mode (another
-    process holds the writer lock). Used by mutating endpoints to
-    return 409."""
+    """Return the role of the explicitly bound SQLite adapter."""
     try:
         return bool(get_store()._read_only)
     except Exception:
@@ -260,223 +210,22 @@ def is_read_only() -> bool:
 
 
 
-@_serialized_store_transition
-def _teardown_store():
-    """Release the store's writer lock (if any) and drop references so
-    the Chroma client can be garbage-collected. Safe to call when no
-    store is initialized."""
-    global _store, _retriever
-    if _store is not None:
-        try:
-            handle = getattr(_store, "_writer_lock_handle", None)
-            if handle is not None:
-                from instinct.chroma_writer_lock import release_writer_lock
-                release_writer_lock(handle)
-                print("[dashboard] released writer lock", file=sys.stderr)
-        except Exception as e:
-            print("[dashboard] WARN during teardown; details withheld", file=sys.stderr)
-    _store = None
-    _retriever = None
-
-
-@_serialized_store_transition
-def acquire_write_mode() -> dict:
-    """Try to upgrade the dashboard to write mode. Tears down the
-    existing (probably read-only) store and re-creates with
-    read_only=False. Returns a status dict for the UI."""
-    global _store
-    _teardown_store()
-    from instinct import configure_dormancy
-    from instinct.chroma_writer_lock import ChromaWriterLockUnavailable, is_writer_lock_held, describe_lock
-    configure_dormancy(PERSIST_DIR)
-    try:
-        _store = InstinctStore(persist_dir=PERSIST_DIR, read_only=False)
-        print("[dashboard] EDIT STORE: now in WRITE mode (lock held by dashboard)", file=sys.stderr)
-        return {
-            "acquired": True,
-            "mode": "write",
-            "holder_pid": os.getpid(),
-            "message": "Dashboard now owns the writer lock. All writes are enabled.",
-        }
-    except ChromaWriterLockUnavailable as e:
-
-
-        holder = describe_lock(PERSIST_DIR)
-        print(
-            f"[dashboard] EDIT STORE: lock held by pid={holder.get('holder_pid')}; "
-            f"staying in READ-ONLY mode.",
-            file=sys.stderr,
-        )
-        _store = InstinctStore(persist_dir=PERSIST_DIR, read_only=True)
-        return {
-            "acquired": False,
-            "mode": "read_only",
-            "holder_pid": holder.get("holder_pid"),
-            "message": (
-                f"Another process (pid={holder.get('holder_pid')}) holds the writer lock. "
-                "Stop the MCP server (or whichever process) and click Edit Store again."
-            ),
-        }
-
-
-@_serialized_store_transition
-def release_write_mode() -> dict:
-    """Drop our writer lock so MCP can take over. Dashboard falls
-    back to read-only observation."""
-    _teardown_store()
-    from instinct import configure_dormancy
-    configure_dormancy(PERSIST_DIR)
-    global _store
-    _store = InstinctStore(persist_dir=PERSIST_DIR, read_only=True)
-    print("[dashboard] BACK TO MCP: released writer lock, now in READ-ONLY mode", file=sys.stderr)
-    return {
-        "released": True,
-        "mode": "read_only",
-        "message": "Writer lock released. The MCP server (or another process) can now acquire it.",
-    }
-
-
-
-
-
-
-
-
-def auto_acquire_write_mode(max_wait_seconds: float = 60.0) -> dict:
-    """Block (up to max_wait_seconds) waiting for the writer lock to
-    be released by another process, then acquire it.
-
-    Returns the same shape as acquire_write_mode(), plus
-    'waited_seconds' and 'acquired' so the UI can show progress.
-    """
-    import time as _time
-    from instinct.chroma_writer_lock import is_writer_lock_held
-    start = _time.monotonic()
-    waited = 0.0
-    backoff = 1.0
-    while waited < max_wait_seconds:
-
-        if not is_writer_lock_held(PERSIST_DIR):
-            result = acquire_write_mode()
-            result["waited_seconds"] = round(waited, 2)
-            return result
-
-        sleep_for = min(backoff, 5.0, max_wait_seconds - waited)
-        if sleep_for <= 0:
-            break
-        _time.sleep(sleep_for)
-        waited += sleep_for
-        backoff = min(backoff * 1.5, 5.0)
-
-    result = acquire_write_mode()
-    result["waited_seconds"] = round(waited, 2)
-    result["timed_out"] = True
-    return result
-
-
-
-
-
-
-
 def readiness_check() -> dict:
-    """Return a structured readiness report. Caller wraps in HTTP code."""
-    isolated = bound_store()
-    if isolated is not None:
-        return {
-            'ok': True, 'reasons': [],
-            'checks': {'backend': 'sqlite', 'store_count': isolated.count(),
-                       'query_bound': isolated.query_embedder is not None,
-                       'documents_bound': isolated.document_embedder is not None,
-                       'read_only': isolated._read_only,
-                       'runtime_ready': False, 'pending_replay_ready': False},
-        }
-    import time as _time
-    reasons = []
-    checks = {}
-    t0 = _time.monotonic()
-
-    try:
-        store = get_store()
-        seg_count = store.count()
-        checks["store_count"] = seg_count
-        if seg_count is None:
-            reasons.append("store.count() returned None")
-    except Exception as e:
-        reasons.append("store unreachable; details withheld")
-        seg_count = None
-
-    try:
-
-
-        coll = getattr(store, "_collection", None)
-        if coll is None:
-            reasons.append("store._collection is None")
-            checks["embedding_loaded"] = False
-        else:
-            try:
-                coll.count()
-                checks["embedding_loaded"] = True
-            except Exception as e:
-                reasons.append("chroma count failed; details withheld")
-                checks["embedding_loaded"] = False
-    except Exception as e:
-        reasons.append("collection unreachable; details withheld")
-        checks["embedding_loaded"] = False
-
-    try:
-        p = Path(PERSIST_DIR)
-        if not p.exists():
-            reasons.append(f"persist_dir missing: {PERSIST_DIR}")
-        else:
-            checks["persist_dir"] = str(p)
-    except Exception as e:
-        reasons.append("persist_dir check failed; details withheld")
-
-    try:
-        from instinct.chroma_writer_lock import is_writer_lock_held, describe_lock, _is_pid_alive
-        held = is_writer_lock_held(PERSIST_DIR)
-        desc = describe_lock(PERSIST_DIR)
-        checks["writer_lock"] = {"held": bool(held), "desc": desc}
-
-
-
-
-        holder_pid = desc.get("holder_pid")
-        held_by_us = desc.get("held_by_us", False)
-        if held and not held_by_us and holder_pid and not _is_pid_alive(holder_pid) and not is_read_only():
-
-
-            pass
-        if held and not held_by_us and holder_pid and _is_pid_alive(holder_pid) and not is_read_only():
-            reasons.append(
-                f"writer lock held by pid={holder_pid} (alive) but "
-                f"dashboard reports write mode (own pid={os.getpid()})"
-            )
-    except Exception as e:
-        reasons.append("writer-lock check failed; details withheld")
-
-    try:
-        from instinct import session_timer as _st
-        st = _st.state(PERSIST_DIR)
-        checks["session_clock"] = {
-            "started": bool(st.session_started_at),
-            "accumulated_s": st.accumulated_session_seconds,
-        }
-    except Exception as e:
-        reasons.append("session clock unreachable; details withheld")
-
-    ok = (len(reasons) == 0)
-    elapsed_ms = round((_time.monotonic() - t0) * 1000, 1)
+    """Describe the service-bound SQLite adapter without opening a backend."""
+    store = get_store()
+    embeddings_bound = store.query_embedder is not None and store.document_embedder is not None
+    reasons = [] if embeddings_bound else ['Embedding bindings missing; text operations unavailable']
     return {
-        "ok": ok,
-        "ready": ok,
-        "reasons": reasons,
-        "checks": checks,
-        "mode": "read_only" if is_read_only() else "write",
-        "elapsed_ms": elapsed_ms,
-        "pid": os.getpid(),
-        "ts": datetime.utcnow().isoformat() + "Z",
+        'ok': True, 'ready': True, 'backend': 'sqlite', 'reasons': reasons,
+        'checks': {
+            'backend': 'sqlite', 'store_count': store.count(),
+            'query_bound': store.query_embedder is not None,
+            'documents_bound': store.document_embedder is not None,
+            'read_only': store._read_only, 'runtime_ready': False,
+            'pending_replay_ready': False,
+        },
+        'mode': 'read_only' if store._read_only else 'write',
+        'pid': os.getpid(), 'ts': datetime.now().isoformat() + 'Z',
     }
 
 
@@ -486,112 +235,16 @@ def readiness_check() -> dict:
 
 
 def admin_reset(include_recycle: bool = False, dry_run: bool = False) -> dict:
-    """Wipe active segments (optionally including the recycle bin) and
-    back up the previous state to instinct_data/backups/.
-
-    By default (include_recycle=False), segments are removed but the
-    recycle bin is preserved. With include_recycle=True, EVERYTHING is
-    wiped. With dry_run=True, no writes happen — useful for the UI to
-    preview what would be deleted.
-    """
-    from datetime import datetime as _dt, timezone as _tz
-    import shutil
-    import json as _json
-    from .private_storage import ensure_private_directory, atomic_private_writer, private_binary_reader, write_private_text
-    backup_root = Path(PERSIST_DIR) / "backups"
-    ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    chroma_path = Path(PERSIST_DIR) / "chroma.sqlite3"
-    backup_chroma = backup_root / f"chroma_pre_reset_{ts}.sqlite3"
-
-
-
-    recycle_backup = backup_root / f"recycle_pre_reset_{ts}.json"
-    recycle_snapshot = []
-    try:
-        store = get_store()
-        if store.count() > 100000:
-            return {"error": "reset exceeds the 100000-record maintenance limit", "code": 400}
-        active_segments = store.get_by_score(min_score=0, limit=100000)
-        recycled_segments = store.list_recycled(limit=100000)
-        for seg in recycled_segments:
-            recycle_snapshot.append({"id": seg.id, "metadata": seg.to_storage_dict()})
-    except Exception as e:
-        return {"error": "failed to snapshot recycle bin; details withheld", "code": 500}
-
-    if dry_run:
-        return {
-            "ok": True,
-            "dry_run": True,
-            "would_backup_chroma_to": str(backup_chroma),
-            "would_backup_recycle_to": str(recycle_backup),
-            "would_wipe_recycle_count": (
-                len(recycle_snapshot) if include_recycle else 0
-            ),
-            "active_segment_count": len(active_segments),
-            "ts": ts,
-        }
-
-
-    ensure_private_directory(PERSIST_DIR)
-    ensure_private_directory(backup_root)
-    if chroma_path.exists():
-        try:
-            with private_binary_reader(chroma_path, confidential=False) as source:
-                with atomic_private_writer(backup_chroma, replace=False) as output:
-                    shutil.copyfileobj(source, output)
-        except Exception as e:
-            return {"error": "failed to back up chroma; details withheld", "code": 500}
-
-    try:
-        write_private_text(recycle_backup, _json.dumps(recycle_snapshot, indent=2), replace=False)
-    except Exception as e:
-        return {"error": "failed to write recycle snapshot; details withheld", "code": 500}
-
-
-    wiped_active = 0
-    try:
-        for seg in active_segments:
-            if not store.delete(seg.id):
-                raise RuntimeError("active segment deletion was not confirmed")
-            wiped_active += 1
-    except Exception as e:
-        return {"error": "wipe failed mid-way; deletion not confirmed; details withheld", "code": 500}
-
-    wiped_recycle = 0
-    if include_recycle:
-        try:
-            for seg in recycled_segments:
-                if not store.delete(seg.id):
-                    raise RuntimeError("recycled segment deletion was not confirmed")
-                wiped_recycle += 1
-        except Exception as e:
-            return {"error": "recycle wipe failed mid-way; details withheld", "code": 500}
-
+    """Refuse legacy reset semantics; SQLite reset requires a reviewed restore workflow."""
     return {
-        "ok": True,
-        "ts": ts,
-        "backup_chroma": str(backup_chroma),
-        "backup_recycle": str(recycle_backup),
-        "wiped_active": wiped_active,
-        "wiped_recycle": wiped_recycle,
-        "include_recycle": include_recycle,
-        "preserved_recycle_count": len(recycle_snapshot) if not include_recycle else 0,
+        'ok': False, 'code': 501,
+        'error': 'Dashboard reset is not available. Use an offline SQLite backup and initialize a reviewed replacement runtime.',
+        'dry_run': dry_run,
+        'include_recycle': include_recycle,
     }
 
 
 
-def cmd_reset(include_recycle: bool = False, dry_run: bool = False) -> int:
-    """Run the reset from the CLI without starting the dashboard."""
-    print(f"[reset] persist_dir: {PERSIST_DIR}")
-    if is_read_only():
-        print("[reset] ERROR: dashboard is in read-only mode. Run "
-              "`python dashboard.py --reset` only when the dashboard holds "
-              "the writer lock, or use `python dashboard.py` and click "
-              "'Edit Store' first.", file=sys.stderr)
-        return 1
-    result = admin_reset(include_recycle=include_recycle, dry_run=dry_run)
-    print(_json.dumps(result, indent=2))
-    return 0 if result.get("ok") else 1
 
 
 
@@ -617,126 +270,6 @@ def cmd_reset(include_recycle: bool = False, dry_run: bool = False) -> int:
 
 
 
-def _write_recovery(state: str, **extra) -> None:
-    """Write/update the recovery file. state is 'write_session' or 'cleared'."""
-    try:
-        from .private_storage import write_private_text
-        payload = {
-            "state": state,
-            "pid": os.getpid(),
-            "timestamp": datetime.now().isoformat(),
-        }
-        payload.update(extra)
-        write_private_text(RECOVERY_FILE, json.dumps(payload, indent=2))
-    except Exception as e:
-        print("[dashboard] WARN: could not write recovery file; details withheld", file=sys.stderr)
-
-
-def _clear_recovery() -> None:
-    """Mark the recovery file as cleared (session ended cleanly)."""
-    from .private_storage import check_private_file, ensure_private_directory
-    try:
-        if RECOVERY_FILE.exists() or RECOVERY_FILE.is_symlink():
-            ensure_private_directory(RECOVERY_FILE.parent)
-            check_private_file(RECOVERY_FILE)
-    except OSError:
-        print("[dashboard] unsafe recovery marker retained for owner review", file=sys.stderr)
-        return
-    _write_recovery("cleared")
-
-    try:
-        RECOVERY_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-def _recover_on_startup() -> None:
-    """Clear stale dashboard handoff state without controlling other processes."""
-    if RECOVERY_FILE.exists():
-        _clear_recovery()
-
-
-def record_heartbeat() -> dict:
-    """Called by POST /api/heartbeat. Updates the last-heartbeat timestamp.
-    Only meaningful while in a write session."""
-    global _last_heartbeat
-    with _heartbeat_lock:
-        _last_heartbeat = time.monotonic()
-    return {"ok": True, "in_write_session": _in_write_session}
-
-
-def _watchdog_loop() -> None:
-    """Daemon thread: while in a write session, watch for heartbeat
-    timeout. If the browser dies or the user walks away, auto-return
-    control to MCP after HEARTBEAT_TIMEOUT_S of silence."""
-    global _in_write_session, _last_heartbeat
-    while True:
-        time.sleep(HEARTBEAT_CHECK_INTERVAL_S)
-        with _heartbeat_lock:
-            in_session = _in_write_session
-            last = _last_heartbeat
-        if not in_session:
-            continue
-        elapsed = time.monotonic() - last
-        if elapsed < HEARTBEAT_TIMEOUT_S:
-            continue
-
-        print(
-            f"[dashboard] WATCHDOG: heartbeat timed out ({elapsed:.1f}s of silence). "
-            f"Auto-returning control to MCP.",
-            file=sys.stderr,
-        )
-        try:
-            result = return_control()
-            print(
-                f"[dashboard] WATCHDOG: auto-return complete. "
-                f"mcp_started={result.get('mcp_started')}",
-                file=sys.stderr,
-            )
-        except Exception as e:
-            print("[dashboard] WATCHDOG: auto-return FAILED; details withheld", file=sys.stderr)
-
-            with _heartbeat_lock:
-                _in_write_session = False
-            _clear_recovery()
-
-
-def _start_watchdog() -> None:
-    """Start the watchdog daemon thread (idempotent)."""
-    global _watchdog_thread
-    if _watchdog_thread is not None and _watchdog_thread.is_alive():
-        return
-    _watchdog_thread = threading.Thread(
-        target=_watchdog_loop, name="instinct-watchdog", daemon=True
-    )
-    _watchdog_thread.start()
-
-
-def take_control() -> dict:
-    """Acquire only a free writer lock; the client owns MCP process lifecycle."""
-    result = acquire_write_mode()
-    result["mcp_stopped"] = False
-    if result.get("acquired"):
-        global _in_write_session, _last_heartbeat
-        with _heartbeat_lock:
-            _in_write_session = True
-            _last_heartbeat = time.monotonic()
-        _write_recovery("write_session")
-        _start_watchdog()
-        result["heartbeat_timeout_s"] = HEARTBEAT_TIMEOUT_S
-        result["message"] = "Dashboard owns the writer lock. Release it when finished; MCP processes remain managed by your client."
-    return result
-
-
-def return_control() -> dict:
-    """Release the dashboard lock without starting or stopping MCP processes."""
-    global _in_write_session
-    with _heartbeat_lock:
-        _in_write_session = False
-    _clear_recovery()
-    result = release_write_mode()
-    result["mcp_started"] = False
-    return result
 
 
 
@@ -1326,12 +859,13 @@ class Handler(BaseHTTPRequestHandler):
 let instinctReadOnly = true;
 let instinctCapability = __INSTINCT_CAPABILITY__;
 let instinctCapabilityRefresh = null;
+let instinctPreferReadOnly = false;
 function dashboardEscapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
 }
 function instinctCanWrite() {
-  try { return !instinctReadOnly && localStorage.getItem('instinct:preferReadOnly') !== '1'; }
-  catch { return !instinctReadOnly; }
+  try { instinctPreferReadOnly = localStorage.getItem('instinct:preferReadOnly') === '1'; } catch {}
+  return !instinctReadOnly && !instinctPreferReadOnly;
 }
 function dashboardApplyWriteState() {
   const blocked = !instinctCanWrite();
@@ -1359,9 +893,9 @@ async function dashboardFetch(path, options = {}) {
   if (target.origin !== location.origin) throw new Error('Cross-origin request denied');
   const headers = new Headers(options.headers || {});
   if ((options.method || 'GET').toUpperCase() === 'POST') {
-    const readable = ['/api/ready','/api/heartbeat','/api/score/recommend'].includes(target.pathname) || target.pathname.startsWith('/api/mode/') || target.pathname === '/api/admin/reset' && JSON.parse(options.body || '{}').dry_run === true;
+    const readable = ['/api/ready','/api/heartbeat','/api/score/recommend'].includes(target.pathname);
     const search = target.pathname === '/api/search_with_pop' && JSON.parse(options.body || '{}').apply_pops === false && JSON.parse(options.body || '{}').track_access === false;
-    if (!instinctCanWrite() && !readable && !search) throw new Error('Read-only mode or preference: acquire the writer lock before editing');
+    if (!instinctCanWrite() && !readable && !search) throw new Error('Read-only SQLite observer: restart the SQLite service in owner mode before editing');
     headers.set('X-Instinct-Capability', instinctCapability);
     headers.set('Content-Type', 'application/json');
     options = {...options, body: options.body === undefined ? '{}' : options.body};
@@ -1376,6 +910,20 @@ async function dashboardFetch(path, options = {}) {
   });
 }
 document.addEventListener('DOMContentLoaded', async () => {
+  const readOnlyPreference = document.getElementById('instinct-prefer-readonly');
+  if (readOnlyPreference) {
+    try { readOnlyPreference.checked = localStorage.getItem('instinct:preferReadOnly') === '1'; } catch {}
+    instinctPreferReadOnly = readOnlyPreference.checked;
+    readOnlyPreference.addEventListener('change', () => {
+      instinctPreferReadOnly = readOnlyPreference.checked;
+      try {
+        if (instinctPreferReadOnly) localStorage.setItem('instinct:preferReadOnly', '1');
+        else localStorage.removeItem('instinct:preferReadOnly');
+      } catch {}
+      dashboardApplyWriteState();
+    });
+    dashboardApplyWriteState();
+  }
   async function refreshWriteState() {
     try { const response = await dashboardFetch('/api/mode'); const state = await response.json(); instinctReadOnly = !response.ok || state.read_only; }
     catch { instinctReadOnly = true; }
@@ -1386,6 +934,140 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 </script>""".replace("__INSTINCT_CAPABILITY__", json.dumps(self.server.capability_token))
         responsive = """<style>
+:root {
+  --bg: #101512;
+  --surface: #1a211d;
+  --surface-2: #232d26;
+  --border: #334239;
+  --text: #e5ede7;
+  --text-dim: #9aada0;
+  --accent: #20873d;
+  --accent-h: #35b95a;
+  --brand-bright: #5bec7d;
+  --brand-deep: #246f3a;
+  --success: #1d7136;
+  --success-h: #278d46;
+  --danger: #a83a2a;
+  --danger-h: #c44835;
+}
+body[data-theme="light"] {
+  --bg: #eff4f0;
+  --surface: #ffffff;
+  --surface-2: #e6efe8;
+  --border: #c9d9cd;
+  --text: #1a241d;
+  --text-dim: #4f6255;
+  --accent: #246f3a;
+  --accent-h: #1e9e43;
+  --brand-bright: #157a34;
+  --brand-deep: #285a38;
+  --idle-bg: #e6efe8;
+  --idle: #66786a;
+  --pill-fg: #405448;
+  --success: #1d7136;
+  --success-h: #278d46;
+  --danger: #a83a2a;
+  --danger-h: #c44835;
+}
+body { color-scheme: dark; background: var(--bg); color: var(--text); }
+body[data-theme="light"] { color-scheme: light; }
+header { background: var(--surface); border-bottom-color: var(--border); }
+header.app-bar { background: color-mix(in srgb, var(--surface) 94%, transparent); }
+header a, summary { color: var(--brand-bright); }
+main { color: var(--text); }
+.panel, .picker, .stage, .section, .status-bar, #seg-list {
+  background-color: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+.q, .opt, #scorecard-panel .sc-pill {
+  background-color: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+.q:hover, .opt:hover, #scorecard-panel .sc-pill:hover { border-color: var(--brand-deep); }
+.q.selected, .opt.selected, #scorecard-panel .sc-pill.on {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  border-color: var(--brand-bright);
+  color: var(--text);
+}
+.recommend, #scorecard-panel .sc-box.filled {
+  background: color-mix(in srgb, var(--brand-deep) 20%, var(--surface));
+  border-color: var(--brand-deep);
+}
+.recommend h3, .recommend .score, #scorecard-panel .sc-tier,
+#scorecard-panel .sc-box.score-stc .v, #scorecard-panel .sc-box.pop-on .v {
+  color: var(--brand-bright);
+}
+.recommend .reasoning, .stage .desc, .stat, .legend { color: var(--text-dim); }
+.sc-reasoning, .stage .desc .box, .kb-dialog kbd { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+.picker select, .picker input, .stage .gross, .stage .result,
+.stage .desc code, .seg-toolbar select, #sort-controls select,
+input, textarea, select, fieldset {
+  background-color: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+button:not(.danger):not(.success) {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button:not(.danger):not(.success):hover,
+.actions button.pop, .actions button.pop:hover {
+  background-color: var(--accent-h);
+  border-color: var(--accent-h);
+  color: #fff;
+}
+.app-bar nav button:not(.danger):not(.success) {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+.app-bar nav button:not(.danger):not(.success):hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text);
+}
+.actions-menu-panel button:not(.danger):not(.success) {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+.actions-menu-panel button:not(.danger):not(.success):hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+button:focus-visible, a:focus-visible, input:focus-visible,
+textarea:focus-visible, select:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 2px;
+}
+a, summary { text-decoration-color: var(--brand-deep); }
+.panel h2, .section h2 { color: var(--brand-bright); }
+.seg-item.selected { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); border-left-color: var(--brand-bright); }
+.seg-item .mod-link, .seg-diff .diff-field { color: var(--brand-bright); }
+.seg-item .mod-link { background: color-mix(in srgb, var(--brand-deep) 30%, var(--surface)); border-color: var(--brand-deep); }
+.seg-item .mod-link:hover { background: var(--brand-deep); color: #fff; }
+.status-bar .path, #sort-controls select { color: var(--brand-bright); }
+.status-bar .path { background: var(--surface-2); }
+.mode-banner:not(.write):not(.read_only) { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); }
+.mode-banner .status, .mode-banner .read-only-preference-note { color: var(--text-dim); }
+.toast:not(.error) { background: var(--brand-deep); color: #fff; }
+.stage.initial { border-color: var(--brand-deep); }
+.stage.final { border-color: var(--brand-bright); }
+.stage .gross.pos, .stage .desc .flags .on { color: var(--brand-bright); }
+.seg-diff { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+.seg-diff .diff-added { background: color-mix(in srgb, var(--brand-deep) 25%, var(--surface)); color: var(--brand-bright); }
+.seg-diff .diff-changed { background: color-mix(in srgb, var(--brand-deep) 18%, var(--surface)); color: var(--text); }
+#bulk-bar { background: color-mix(in srgb, var(--brand-deep) 24%, var(--surface)); border-color: var(--brand-deep); color: var(--text); }
+#bulk-bar b { color: var(--brand-bright); }
+#bulk-bar button:not(.danger) { background: var(--brand-deep); border-color: var(--brand-bright); color: #fff; }
+.pop-audit { background: color-mix(in srgb, var(--brand-deep) 28%, var(--surface)); border-color: var(--brand-deep); color: var(--brand-bright); }
+.sparkline { background: var(--surface-2); border-color: var(--border); }
+.score-cta { background: color-mix(in srgb, var(--brand-deep) 28%, var(--surface)); border-color: var(--brand-deep); color: var(--brand-bright); }
+.score-cta:hover { background: var(--brand-deep); color: #fff; }
+svg { background-color: var(--surface-2); }
 @media (max-width: 900px) {
   header {position:static !important; flex-wrap:wrap;}
   main {display:block !important;}
@@ -1478,6 +1160,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return self._send_json({"capability": self.server.capability_token})
             if url.path == "/" or url.path == "/index.html":
                 return self._send_html(INDEX_HTML)
+            if url.path == "/assets/vecretary-logo.png":
+                image = resources.files("instinct").joinpath(
+                    "assets", "vecretary-logo-512.png").read_bytes()
+                self.send_response(200)
+                self._security_headers()
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(image)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(image)
+                return
             if url.path == "/favicon.ico":
 
                 gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00!\xf9\x04\x00\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
@@ -1489,22 +1182,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                 self.wfile.write(gif)
                 return
             if url.path == "/api/health":
-                from instinct.chroma_writer_lock import describe_lock
                 store = get_store()
-
-
-
-
                 ready = readiness_check()
                 return self._send_json({
                     "ok": True,
                     "ready": ready["ok"],
                     "degraded_reasons": ready["reasons"],
-                    "store_dir": PERSIST_DIR,
-                    "writer_lock": describe_lock(PERSIST_DIR),
+                    "backend": "sqlite",
+                    "store_dir": str(store.persist_dir),
+                    "writer_lock": {"held_by_us": not store._read_only},
                     "read_only": is_read_only(),
                     "pid": os.getpid(),
-                    "embedding_model": getattr(store, "embedding_model", None),
+                    "embedding_model": store.repository.identity.model,
+                    "runtime_ready": False,
                     "ts": datetime.now().isoformat() + "Z",
                 })
             if url.path == "/api/ready":
@@ -1515,13 +1205,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 code = 200 if report["ok"] else 503
                 return self._send_json(report, code)
             if url.path == "/api/mode":
-
-
-                from instinct.chroma_writer_lock import describe_lock
+                store = get_store()
                 return self._send_json({
-                    "read_only": is_read_only(),
-                    "mode": "read_only" if is_read_only() else "write",
-                    "writer_lock": describe_lock(PERSIST_DIR),
+                    "backend": "sqlite",
+                    "read_only": store._read_only,
+                    "mode": "read_only" if store._read_only else "write",
+                    "handoff_supported": False,
+                    "runtime_ready": False,
                     "pid": os.getpid(),
                 })
             if url.path == "/api/stats":
@@ -1747,22 +1437,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         try:
 
 
-            if url.path == "/api/mode/edit":
-                return self._send_json(acquire_write_mode())
-            if url.path == "/api/mode/release":
-                return self._send_json(release_write_mode())
-            if url.path == "/api/mode/take_control":
-                return self._send_json(take_control())
-            if url.path == "/api/mode/return_control":
-                return self._send_json(return_control())
-
-
-
-            if url.path == "/api/mode/auto_acquire":
-                max_wait = data.get("max_wait_seconds", 60.0)
-                if type(max_wait) not in (int, float) or not 0 <= max_wait <= 60:
-                    return self._send_json(_err("max_wait_seconds must be a number from 0 to 60"), 400)
-                return self._send_json(auto_acquire_write_mode(max_wait_seconds=max_wait))
+            if url.path.startswith("/api/mode/"):
+                return self._send_json({"error": "SQLite service does not support writer handoff", "backend": "sqlite"}, 501)
 
             if url.path == "/api/ready":
                 report = readiness_check()
@@ -1781,13 +1457,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if url.path == "/api/heartbeat":
 
 
-                try:
-                    from instinct.nudge import tick_nudge_session
-                    from instinct.dormancy import _cfg as _dorm_cfg
-                    tick_nudge_session(get_store(), idle_minutes=float(_dorm_cfg().session_idle_minutes))
-                except Exception:
-                    sys.stderr.write('[dashboard] optional operation failed; details withheld\n')
-                return self._send_json(record_heartbeat())
+                return self._send_json({"error": "Heartbeat requires the SQLite service owner thread"}, 501)
 
 
 
@@ -1795,11 +1465,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 
             if is_read_only():
-                _RO_ALLOW = {"/api/score/recommend", "/api/search_with_pop", "/api/ready", "/api/admin/reset",
-                             "/api/mode/auto_acquire"}
+                _RO_ALLOW = {"/api/score/recommend", "/api/search_with_pop", "/api/ready"}
                 if url.path not in _RO_ALLOW:
                     return self._send_json({
-                        "error": "read-only mode: another process (likely the MCP server) holds the writer lock. Click 'Edit Store' to take over, or stop the other process first.",
+                        "error": "read-only SQLite observer: start an owner service after the observer stops.",
                         "code": 409,
                         "read_only": True,
                     }, 409)
@@ -2187,186 +1856,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 MODE_BANNER_HTML = r"""
 <style>
   .mode-banner { display: flex; align-items: center; gap: 8px;
+                 flex-wrap: wrap;
                  padding: 6px 12px; border-radius: 4px;
                  font-size: 12px; font-weight: 600;
                  margin: 8px 12px 0; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
   .mode-banner.write    { background: var(--success); border: 1px solid var(--success-h); color: #fff; }
   .mode-banner.read_only{ background: var(--danger); border: 1px solid var(--danger-h); color: #fff; }
-  .mode-banner button { background: #2a4a7a; color: #eee; border: 0; border-radius: 3px;
-                        padding: 4px 10px; cursor: pointer; font: inherit; font-size: 11px;
-                        font-weight: 500; }
-  .mode-banner button:hover { background: #345a8a; }
-  .mode-banner button.danger { background: #7a2a2a; }
-  .mode-banner button.danger:hover { background: #8a3434; }
-  .mode-banner button.success { background: #2a6a2a; }
-  .mode-banner button.success:hover { background: #348a34; }
-  .mode-banner button:disabled { opacity: 0.4; cursor: not-allowed; }
-  .mode-banner .status { font-size: 11px; color: #ccc; }
-  .mode-banner .spinner { display: none; font-size: 11px; color: #888; }
-  .mode-banner.busy .spinner { display: inline; }
-  /* Take Control dialog */
-  .tc-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                 background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center;
-                 align-items: center; }
-  .tc-overlay.show { display: flex; }
-  .tc-dialog { background: #1e1e1e; border: 1px solid #444; border-radius: 8px;
-               padding: 24px; max-width: 480px; width: 90%; color: #eee; }
-  .tc-dialog h2 { margin: 0 0 12px; font-size: 18px; }
-  .tc-dialog p { font-size: 13px; line-height: 1.5; color: #ccc; margin: 8px 0; }
-  .tc-dialog .tc-steps { margin: 12px 0; padding: 12px; background: #2a2a2a; border-radius: 4px; }
-  .tc-dialog .tc-steps div { padding: 4px 0; font-size: 12px; color: #aaa; }
-  .tc-dialog .tc-steps div.active { color: #6c6; font-weight: 600; }
-  .tc-dialog .tc-steps div.done { color: #6c6; }
-  .tc-dialog .tc-steps div.pending { color: #666; }
-  .tc-dialog .tc-buttons { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
-  .tc-dialog button { padding: 8px 16px; border: 0; border-radius: 4px; cursor: pointer;
-                      font: inherit; font-size: 13px; font-weight: 500; }
-  .tc-dialog button.primary { background: #2a6a2a; color: #eee; }
-  .tc-dialog button.primary:hover { background: #348a34; }
-  .tc-dialog button.secondary { background: #444; color: #eee; }
-  .tc-dialog button.secondary:hover { background: #555; }
-  .tc-dialog button.danger { background: #7a2a2a; color: #eee; }
-  .tc-dialog button.danger:hover { background: #8a3434; }
-  .tc-dialog button:disabled { opacity: 0.4; cursor: not-allowed; }
-  .tc-dialog .tc-result { margin-top: 12px; padding: 10px; border-radius: 4px;
-                          font-size: 12px; display: none; }
-  .tc-dialog .tc-result.show { display: block; }
-  .tc-dialog .tc-result.ok { background: #1a3a1a; color: #6c6; }
-  .tc-dialog .tc-result.err { background: #3a1a1a; color: #f66; }
+  .mode-banner .status { font-size: 11px; color: var(--text-dim); }
+  .mode-banner .read-only-preference { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-weight: 500; cursor: pointer; }
+  .mode-banner .read-only-preference-note { font-size: 10px; font-weight: 400; color: var(--text-dim); }
 </style>
 <div class="mode-banner" id="mode-banner">
   <span class="status" id="mode-banner-status">checking mode...</span>
-  <button id="mode-edit-btn" onclick="modeEdit()" title="Acquire a free writer lock and switch the dashboard to write mode">Edit Store</button>
-  <button id="mode-release-btn" class="danger" onclick="modeRelease()" title="Release the writer lock and return to MCP (dashboard goes read-only)">Back to MCP</button>
-  <span class="spinner">working...</span>
-</div>
-
-<!-- Take Control Dialog -->
-<div class="tc-overlay" id="tc-overlay">
-  <div class="tc-dialog">
-    <h2 id="tc-title">Take Control</h2>
-    <p id="tc-desc">Close the MCP connection in your client if it owns the writer lock. The dashboard only acquires a free lock and never starts or stops MCP processes.</p>
-    <div class="tc-steps" id="tc-steps">
-      <div id="tc-step-1" class="pending">1. Close MCP in your client if needed</div>
-      <div id="tc-step-2" class="pending">2. Acquire writer lock</div>
-      <div id="tc-step-3" class="pending">3. Dashboard in write mode</div>
-    </div>
-    <div class="tc-result" id="tc-result"></div>
-    <div class="tc-buttons" id="tc-buttons-take">
-      <button class="secondary" onclick="tcCancel()">Cancel</button>
-      <button class="danger" id="tc-confirm-btn" onclick="tcTakeControl()" title="Acquire a free writer lock without controlling other processes">Acquire Free Writer Lock</button>
-    </div>
-    <div class="tc-buttons" id="tc-buttons-return" style="display:none;">
-      <button class="secondary" onclick="tcCancel()">Keep Editing</button>
-      <button class="success" id="tc-return-btn" onclick="tcReturnControl()" title="Release the writer lock; reconnect MCP in your client if needed">Save & Return to MCP</button>
-    </div>
-  </div>
+  <span>One SQLite owner serves MCP and dashboard requests.</span>
+  <label class="read-only-preference" title="Browser-local preference; the SQLite service still enforces write permissions.">
+    <input type="checkbox" id="instinct-prefer-readonly" aria-describedby="read-only-preference-note">
+    <span>Prefer read-only</span>
+  </label>
+  <span class="read-only-preference-note" id="read-only-preference-note">Dashboard-local preference only.</span>
 </div>
 
 <script>
 (async function modeInit() {
   const banner = document.getElementById('mode-banner');
   const status = document.getElementById('mode-banner-status');
-  const editBtn = document.getElementById('mode-edit-btn');
-  const relBtn = document.getElementById('mode-release-btn');
-
-  // --- Take Control dialog ---
-  const overlay = document.getElementById('tc-overlay');
-  const tcResult = document.getElementById('tc-result');
-  const stepsTake = document.getElementById('tc-buttons-take');
-  const stepsReturn = document.getElementById('tc-buttons-return');
-
-  window.tcCancel = function() { overlay.classList.remove('show'); };
-
-  window.modeEdit = async function() {
-    // Open the Take Control dialog instead of the old direct acquire
-    overlay.classList.add('show');
-    document.getElementById('tc-title').textContent = 'Take Control';
-    document.getElementById('tc-desc').textContent = 'Close MCP in your client if it owns the writer lock. This only acquires a free lock; no processes are stopped or restarted.';
-    stepsTake.style.display = 'flex';
-    stepsReturn.style.display = 'none';
-    tcResult.classList.remove('show', 'ok', 'err');
-    document.getElementById('tc-step-1').className = 'pending';
-    document.getElementById('tc-step-2').className = 'pending';
-    document.getElementById('tc-step-3').className = 'pending';
-  };
-
-  window.tcTakeControl = async function() {
-    const btn = document.getElementById('tc-confirm-btn');
-    btn.disabled = true;
-    btn.textContent = 'Acquiring lock...';
-    document.getElementById('tc-step-1').className = 'active';
-    tcResult.classList.remove('show', 'ok', 'err');
-
-    try {
-      const r = await dashboardFetch('/api/mode/take_control', { method: 'POST' });
-      const j = await r.json();
-
-      if (j.acquired) {
-        try { localStorage.removeItem('instinct:preferReadOnly'); } catch {}
-        document.getElementById('tc-step-1').className = 'done';
-        document.getElementById('tc-step-2').className = 'done';
-        document.getElementById('tc-step-3').className = 'done';
-        tcResult.textContent = j.message;
-        tcResult.className = 'tc-result show ok';
-        stepsTake.style.display = 'none';
-        stepsReturn.style.display = 'flex';
-        // Reload after a short delay to refresh the page in write mode
-        setTimeout(function() { window.location.reload(); }, 1500);
-      } else {
-        document.getElementById('tc-step-1').className = j.acquired ? 'done' : 'pending';
-        tcResult.textContent = j.message || 'Failed to acquire writer lock.';
-        tcResult.className = 'tc-result show err';
-        btn.disabled = false;
-        btn.textContent = 'Acquire Free Writer Lock';
-      }
-    } catch (e) {
-      tcResult.textContent = 'Take Control failed: ' + e;
-      tcResult.className = 'tc-result show err';
-      btn.disabled = false;
-      btn.textContent = 'Acquire Free Writer Lock';
-    }
-  };
-
-  window.modeRelease = async function() {
-    // Open the Return Control dialog
-    overlay.classList.add('show');
-    document.getElementById('tc-title').textContent = 'Save & Return to MCP';
-    document.getElementById('tc-desc').textContent = 'This releases the writer lock. Reconnect MCP in your client if needed; the dashboard does not start processes.';
-    stepsTake.style.display = 'none';
-    stepsReturn.style.display = 'flex';
-    tcResult.classList.remove('show', 'ok', 'err');
-  };
-
-  window.tcReturnControl = async function() {
-    const btn = document.getElementById('tc-return-btn');
-    btn.disabled = true;
-    btn.textContent = 'Releasing lock...';
-    tcResult.classList.remove('show', 'ok', 'err');
-
-    try {
-      const r = await dashboardFetch('/api/mode/return_control', { method: 'POST' });
-      const j = await r.json();
-      tcResult.textContent = j.message;
-      tcResult.className = 'tc-result show ' + (j.released ? 'ok' : 'err');
-      if (j.released) {
-        setTimeout(function() { window.location.reload(); }, 2000);
-      } else {
-        btn.disabled = false;
-        btn.textContent = 'Save & Return to MCP';
-      }
-    } catch (e) {
-      tcResult.textContent = 'Return Control failed: ' + e;
-      tcResult.className = 'tc-result show err';
-      btn.disabled = false;
-      btn.textContent = 'Save & Return to MCP';
-    }
-  };
-
-  // --- Heartbeat: keep the dashboard's write session alive ---
-  // While in WRITE mode, POST /api/heartbeat every 10s. The server-side
-  // watchdog auto-returns control to MCP if this stops (browser closed,
-  // crash, user walks away). On beforeunload, send a beacon too.
+  // Keep the owner SQLite session active while the dashboard is in use.
   let heartbeatTimer = null;
   let inWriteMode = false;
 
@@ -2392,29 +1906,16 @@ MODE_BANNER_HTML = r"""
     try {
       const r = await dashboardFetch('/api/mode');
       const j = await r.json();
-      if (j.handoff_supported === false) {
+      if (j.backend === 'sqlite') {
         banner.className = 'mode-banner ' + j.mode;
-        status.textContent = j.read_only ? 'SQLITE OBSERVER (browse only; handoff disabled)' : 'SQLITE OWNER (MCP + dashboard share one owner; handoff disabled)';
-        editBtn.disabled = true;
-        relBtn.disabled = true;
+        status.textContent = j.read_only
+          ? 'SQLITE OBSERVER (browse only; owner service required for writes)'
+          : 'SQLITE OWNER (MCP and dashboard share one service)';
         if (j.read_only) stopHeartbeat(); else startHeartbeat();
         return;
       }
-      if (j.mode === 'write') {
-        banner.className = 'mode-banner write';
-        status.textContent = 'WRITE MODE (lock held by dashboard, pid=' + j.pid + ')';
-        editBtn.disabled = true;
-        relBtn.disabled = false;
-        startHeartbeat();
-      } else {
-        const holder = j.writer_lock && j.writer_lock.holder_pid;
-        banner.className = 'mode-banner read_only';
-        status.textContent = 'READ-ONLY (writer lock held by pid=' + (holder || '?') +
-          '); click Take Control to edit';
-        editBtn.disabled = false;
-        relBtn.disabled = true;
-        stopHeartbeat();
-      }
+      status.textContent = 'Unsupported storage service';
+      stopHeartbeat();
     } catch (e) {
       status.textContent = 'mode check failed: ' + e;
     }
@@ -2426,7 +1927,7 @@ MODE_BANNER_HTML = r"""
     }
   });
 
-  // Re-check mode every 15s to catch watchdog auto-returns
+  // Re-check service mode periodically.
   setInterval(refresh, 15000);
 
   await refresh();
@@ -2447,7 +1948,7 @@ MODIFIER_HTML = """<!doctype html>
   header { background: #1d1d1d; padding: 12px 20px; border-bottom: 1px solid #333;
            display: flex; align-items: center; gap: 16px; }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  header a { color: #6af; text-decoration: none; }
+  header a { color: var(--brand-bright); text-decoration: none; }
   header .meta { font-size: 11px; color: #888; }
   main { max-width: 920px; margin: 0 auto; padding: 16px; }
   .picker { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
@@ -2456,9 +1957,9 @@ MODIFIER_HTML = """<!doctype html>
                    border-radius: 4px; padding: 5px 8px; font: inherit; min-width: 380px; }
   .picker input { background: #222; color: #eee; border: 1px solid #333;
                   border-radius: 4px; padding: 5px 8px; font: inherit; width: 380px; }
-  .picker button { background: #2a4a7a; color: #eee; border: 0; border-radius: 4px;
+  .picker button { background: var(--accent); color: #fff; border: 0; border-radius: 4px;
                    padding: 6px 12px; cursor: pointer; font: inherit; }
-  .picker button:hover { background: #345a8a; }
+  .picker button:hover { background: var(--accent-h); }
   .panel { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
            padding: 12px; margin-bottom: 14px; }
   .panel h2 { font-size: 13px; margin: 0 0 8px 0; text-transform: uppercase;
@@ -2470,15 +1971,15 @@ MODIFIER_HTML = """<!doctype html>
   .stage { display: grid; grid-template-columns: 160px 60px 1fr 110px;
            gap: 8px; align-items: center; background: #161616;
            border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; }
-  .stage.initial { border-color: #6af; }
-  .stage.final   { border-color: #6c6; }
+  .stage.initial { border-color: var(--brand-deep); }
+  .stage.final   { border-color: var(--brand-bright); }
   .stage .label  { font-weight: 600; font-size: 13px; }
   .stage .label .num { display: block; font-size: 11px; color: #888;
                        font-weight: 400; margin-top: 2px; }
   .stage .gross  { text-align: center; font-size: 18px; font-weight: 700;
                    padding: 4px 8px; border-radius: 4px; background: #222; }
   .stage .gross.neg { color: #fa6; }
-  .stage .gross.pos { color: #6c6; }
+  .stage .gross.pos { color: var(--brand-bright); }
   .stage .gross.zero { color: #888; }
   .stage .desc   { font-size: 12px; color: #aaa; line-height: 1.5; }
   .stage .desc code { background: #222; padding: 1px 5px; border-radius: 2px; font-size: 11px; }
@@ -2489,19 +1990,19 @@ MODIFIER_HTML = """<!doctype html>
   .stage .desc .box .b { font-weight: 700; color: #fff; font-size: 14px; }
   .stage .desc .box .l { font-size: 10px; color: #888; text-transform: uppercase; }
   .stage .desc .flags { margin-top: 6px; font-size: 11px; }
-  .stage .desc .flags .on  { color: #6c6; }
+  .stage .desc .flags .on  { color: var(--brand-bright); }
   .stage .desc .flags .off { color: #666; }
   .stage .result { text-align: center; font-size: 22px; font-weight: 700;
                    padding: 6px 10px; border-radius: 4px; background: #222; }
   .arrow { text-align: center; color: #555; font-size: 14px; margin: -2px 0; }
   /* toolbar */
   .actions { display: flex; gap: 8px; margin-top: 6px; }
-  .actions button { background: #2a4a7a; color: #eee; border: 0; border-radius: 4px;
+  .actions button { background: var(--accent); color: #fff; border: 0; border-radius: 4px;
                     padding: 6px 12px; cursor: pointer; font: inherit; }
-  .actions button:hover { background: #345a8a; }
-  .actions button.pop { background: #7a4a2a; }
-  .actions button.pop:hover { background: #8a5a3a; }
-  .toast { position: fixed; bottom: 16px; right: 16px; background: #2a4a7a;
+  .actions button:hover { background: var(--accent-h); }
+  .actions button.pop { background: var(--brand-deep); }
+  .actions button.pop:hover { background: var(--accent-h); }
+  .toast { position: fixed; bottom: 16px; right: 16px; background: var(--brand-deep);
            padding: 8px 12px; border-radius: 4px; display: none; z-index: 50; }
   .toast.error { background: #7a2a2a; }
   .error-msg { color: #fa6; font-size: 13px; padding: 12px; }
@@ -2707,7 +2208,7 @@ DECAY_HTML = """<!doctype html>
   header { background: #1d1d1d; padding: 12px 20px; border-bottom: 1px solid #333;
            display: flex; align-items: center; gap: 16px; }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  header a { color: #6af; text-decoration: none; }
+  header a { color: var(--brand-bright); text-decoration: none; }
   main { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px; }
   .panel { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 12px; }
   .panel h2 { font-size: 13px; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: .05em; color: #999; }
@@ -2717,10 +2218,10 @@ DECAY_HTML = """<!doctype html>
   input, select, button { background: #222; color: #eee; border: 1px solid #333;
                           border-radius: 4px; padding: 5px 8px; font: inherit; box-sizing: border-box; }
   input[type=number] { width: 100%; }
-  button { background: #2a4a7a; cursor: pointer; }
-  button:hover { background: #345a8a; }
+  button { background: var(--accent); cursor: pointer; }
+  button:hover { background: var(--accent-h); }
   button.tiny { padding: 2px 6px; font-size: 11px; }
-  .toast { position: fixed; bottom: 16px; right: 16px; background: #2a4a7a;
+  .toast { position: fixed; bottom: 16px; right: 16px; background: var(--brand-deep);
            padding: 8px 12px; border-radius: 4px; display: none; }
   .toast.error { background: #7a2a2a; }
   svg { background: #161616; border-radius: 4px; display: block; width: 100%; height: auto; }
@@ -2730,7 +2231,7 @@ DECAY_HTML = """<!doctype html>
   .stat { font-size: 11px; color: #aaa; }
   .stat b { color: #fff; }
   details { margin-top: 6px; }
-  summary { cursor: pointer; color: #6af; font-size: 12px; }
+  summary { cursor: pointer; color: var(--brand-bright); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -2769,7 +2270,7 @@ DECAY_HTML = """<!doctype html>
 <script>
 let config = {};
 const SCORES = [100, 90, 80, 70, 50, 20];
-const COLORS = ['#ff5252', '#ff9e2c', '#ffd54a', '#66bb6a', '#42a5f5', '#ab47bc'];
+const COLORS = ['#5bec7d', '#239447', '#9af2b0', '#37bd64', '#b9f5c7', '#2b7040'];
 
 function toast(msg, isError) {
   const t = document.getElementById('toast');
@@ -2876,7 +2377,7 @@ function drawBump(series) {
     svg += `<line x1="${P}" x2="${W-P}" y1="${y(g)}" y2="${y(g)}" stroke="#333" stroke-width="0.5"/>`;
   }
   const path = pts.map(p => `${x(p.t_min)},${y(p.score)}`).join(' ');
-  svg += `<polyline points="${path}" fill="none" stroke="#ff5252" stroke-width="1.5"/>`;
+  svg += `<polyline points="${path}" fill="none" stroke="#5bec7d" stroke-width="1.5"/>`;
   document.getElementById('bumpGraph').innerHTML = svg;
 }
 
@@ -2946,7 +2447,7 @@ SCORE_HTML = """<!doctype html>
   header { background: #1d1d1d; padding: 12px 20px; border-bottom: 1px solid #333;
            display: flex; align-items: center; gap: 16px; }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  header a { color: #6af; text-decoration: none; }
+  header a { color: var(--brand-bright); text-decoration: none; }
   main { max-width: 820px; margin: 0 auto; padding: 16px; }
   .panel { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 16px; margin-bottom: 14px; }
   .panel h2 { font-size: 13px; margin: 0 0 12px 0; text-transform: uppercase; letter-spacing: .05em; color: #999; }
@@ -2954,26 +2455,26 @@ SCORE_HTML = """<!doctype html>
        border-radius: 4px; cursor: pointer; }
   .q:hover { background: #2a2a2a; }
   .q input { margin-right: 8px; }
-  .q.selected { background: #2a3a4a; border-color: #4a6a8a; }
+  .q.selected { background: #172d1f; border-color: #5bec7d; }
   .opt { display: block; padding: 6px 10px; margin: 4px 0 4px 24px; background: #1a1a1a;
          border: 1px solid #2a2a2a; border-radius: 4px; cursor: pointer; }
   .opt:hover { background: #222; }
-  .opt.selected { background: #2a3a4a; border-color: #4a6a8a; }
+  .opt.selected { background: #172d1f; border-color: #5bec7d; }
   .opt small { color: #999; display: block; margin-top: 2px; }
-  .recommend { background: #1a2a1a; border-color: #2a4a2a; padding: 14px; border-radius: 4px; display: none; }
+  .recommend { background: #172d1f; border-color: #246f3a; padding: 14px; border-radius: 4px; display: none; }
   .recommend.show { display: block; }
-  .recommend h3 { margin: 0 0 6px 0; color: #6c6; font-size: 14px; }
-  .recommend .score { font-size: 24px; font-weight: 700; color: #cfc; margin: 6px 0; }
+  .recommend h3 { margin: 0 0 6px 0; color: var(--brand-bright); font-size: 14px; }
+  .recommend .score { font-size: 24px; font-weight: 700; color: #b9f5c7; margin: 6px 0; }
   .recommend .reasoning { font-size: 12px; color: #aaa; }
-  .toast { position: fixed; bottom: 16px; right: 16px; background: #2a4a7a;
+  .toast { position: fixed; bottom: 16px; right: 16px; background: var(--brand-deep);
            padding: 8px 12px; border-radius: 4px; display: none; }
   .toast.error { background: #7a2a2a; }
   textarea, input { background: #222; color: #eee; border: 1px solid #333;
                     border-radius: 4px; padding: 6px 8px; font: inherit; box-sizing: border-box; width: 100%; }
   textarea { min-height: 100px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
-  button { background: #2a4a7a; color: #eee; border: 0; border-radius: 4px;
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 4px;
            padding: 8px 14px; cursor: pointer; font: inherit; }
-  button:hover { background: #345a8a; }
+  button:hover { background: var(--accent-h); }
   button.danger { background: #7a2a2a; }
   button.danger:hover { background: #8a3434; }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -3163,74 +2664,76 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <title>Vecretary Memory Dashboard</title>
 <style>
-  /* Palette: brown / burnt-orange / gold / dark-grey.
-     Green/red reserved for the write-lock state banner only. */
+  /* Charcoal surfaces with deep/bright green accents. */
   :root {
-    color-scheme: light dark;
+    color-scheme: dark;
     --gap: 12px;
     --radius: 8px;
     /* dark theme (default) */
-    --bg:        #1f1a16;   /* dark warm brown */
-    --surface:   #2a221c;   /* panel / header */
-    --surface-2: #352b22;   /* seg-item / input */
-    --border:    #3d3128;
-    --text:      #e8dccb;   /* warm cream */
-    --text-dim:  #a89886;
-    --accent:    #c87533;   /* burnt orange */
-    --accent-h:  #d88847;   /* accent hover */
-    --gold:      #d4a44a;   /* gold — score pills, headings, brand */
-    --gold-dim:  #8a6e35;
-    --success:   #2f6b2f;   /* write-mode OK (green) */
-    --success-h: #3d8a3d;
+    --bg:        #101512;
+    --surface:   #1a211d;
+    --surface-2: #232d26;
+    --border:    #334239;
+    --text:      #e5ede7;
+    --text-dim:  #9aada0;
+    --accent:    #20873d;
+    --accent-h:  #35b95a;
+    --brand-bright: #5bec7d;
+    --brand-deep: #246f3a;
+    --success:   #1d7136;
+    --success-h: #278d46;
     --danger:    #a83a2a;   /* read-only / blocked (red) */
     --danger-h:  #c44835;
   }
   body[data-theme="light"] {
-    --bg:        #f5f0e8;
+    --bg:        #eff4f0;
     --surface:   #ffffff;
-    --surface-2: #f0e8db;
-    --border:    #d6c8b3;
-    --text:      #2a221c;
-    --text-dim:  #6a5d4d;
-    --accent:    #b05a1c;
-    --accent-h:  #c87533;
-    --gold:      #8a6e35;
-    --gold-dim:  #6a5a2a;
+    --surface-2: #e6efe8;
+    --border:    #c9d9cd;
+    --text:      #1a241d;
+    --text-dim:  #4f6255;
+    --accent:    #246f3a;
+    --accent-h:  #1e9e43;
+    --brand-bright: #157a34;
+    --brand-deep: #285a38;
   }
   body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
          margin: 0; background: var(--bg); color: var(--text); }
-  /* Header: sticky, 56px tall, three-zone flex */
+  body { color-scheme: dark; }
+  body[data-theme="light"] { color-scheme: light; }
+  :focus-visible { outline: 2px solid var(--brand-bright); outline-offset: 2px; }
+  /* App header: brand, primary navigation and task-focused actions. */
   header { background: var(--surface); padding: 8px 20px; border-bottom: 1px solid var(--border);
            display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 16px;
            min-height: 56px; position: sticky; top: 0; z-index: 10;
            box-shadow: 0 1px 0 rgba(255,255,255,0.03); }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; color: var(--gold); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.01em; color: var(--brand-bright); }
   header .center { display: flex; align-items: center; justify-content: center; gap: 12px; }
   header .right { display: flex; align-items: center; gap: 8px; }
-  /* Main: three-zone grid. minmax(0,1fr) prevents side-overflow on long content. */
+  /* Main dashboard grid: overview, workspace, memory list and detail. */
   main { display: grid; grid-template-columns: 280px minmax(0,1fr) 320px;
          gap: var(--gap); padding: var(--gap); max-width: 1600px; margin: 0 auto; }
   /* Panel: more breathing room, softer corners */
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
            padding: 16px; box-shadow: 0 1px 0 rgba(255,255,255,0.02); }
   .panel h2 { font-size: 11px; margin: 0 0 12px 0; text-transform: uppercase;
-              letter-spacing: 0.08em; color: var(--gold-dim); font-weight: 600; }
+              letter-spacing: 0.08em; color: var(--brand-deep); font-weight: 600; }
   .seg-list { max-height: calc(100vh - 220px); overflow: auto; border-radius: 6px; background: var(--surface); }
   .seg-item { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
               transition: background 0.1s ease, border-color 0.1s ease;
               border-left: 2px solid transparent; background: var(--surface); color: var(--text); }
   .seg-item:hover { background: var(--surface-2); border-left-color: var(--accent); }
-  .seg-item.selected { background: var(--surface-2); border-left-color: var(--gold); }
+  .seg-item.selected { background: var(--surface-2); border-left-color: var(--brand-bright); }
   .seg-item .t { font-weight: 600; font-size: 13px; color: var(--text); }
   .seg-item .meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   .seg-item .kpis { font-size: 10px; color: var(--text-dim); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
   .seg-item .kpi { background: var(--surface-2); padding: 1px 5px; border-radius: 3px; color: var(--text-dim); }
-  .seg-item .kpi b { color: var(--gold); }
+  .seg-item .kpi b { color: var(--brand-bright); }
   .seg-item .kpi.path { background: var(--surface-2); color: var(--text-dim); font-style: italic; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .score { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px;
-           background: var(--surface-2); color: var(--gold); font-weight: 600; border: 1px solid var(--gold-dim); }
+           background: var(--surface-2); color: var(--brand-bright); font-weight: 600; border: 1px solid var(--brand-deep); }
   .score.m { background: var(--danger); color: #fff; border-color: var(--danger); }
-  .score.h { background: var(--gold); color: var(--bg); border-color: var(--gold); }
+  .score.h { background: var(--brand-deep); color: #fff; border-color: var(--brand-bright); }
   .toolbar { display: flex; gap: 6px; flex-wrap: wrap; }
   /* Unified input + button baseline */
   input, textarea, select {
@@ -3258,7 +2761,7 @@ INDEX_HTML = r"""<!doctype html>
   .row.three { grid-template-columns: 1fr 1fr 1fr; }
   label { display: block; font-size: 11px; color: #999; margin-bottom: 2px; }
   .actions { display: flex; gap: 6px; margin-top: 8px; }
-  .toast { position: fixed; bottom: 16px; right: 16px; background: #2a4a7a; padding: 8px 12px;
+  .toast { position: fixed; bottom: 16px; right: 16px; background: #246f3a; padding: 8px 12px;
            border-radius: 4px; display: none; max-width: 480px;
            font-size: 13px; align-items: center; gap: 10px; }
   .toast.error { background: #7a2a2a; }
@@ -3283,58 +2786,164 @@ INDEX_HTML = r"""<!doctype html>
   .stats b { color: #fff; }
   .empty { color: #777; font-style: italic; padding: 8px; }
 
-  /* ===== Redesign — section-based modern layout =====
-     Replaces the cramped single-row header + flat-main layout. The new
-     structure is:
-       <header>           — app bar (logo + nav + session badge + actions)
-       <.status-bar>      — health banner + stats path (one row)
-       <main.app-shell>   — vertical sections, each in its own .section
-                             with clear heading + body. Stacks on narrow
-                             viewports; side-by-side on wide ones.
-     All rules are additive (no overrides) so existing panels still work. */
+  /* Main dashboard layout uses wider, predictable workspace panels. */
   .app-shell {
-    max-width: 1400px;
+    max-width: 1480px;
     margin: 0 auto;
-    padding: 16px 20px 32px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
+    padding: 20px clamp(14px, 2.4vw, 32px) 40px;
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, .85fr);
+    gap: 18px;
   }
   .app-bar {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 12px 20px;
-    background: #1d1d1d;
-    border-bottom: 1px solid #333;
+    gap: 16px;
+    padding: 10px clamp(14px, 2.4vw, 32px);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
     flex-wrap: wrap;
     position: sticky;
     top: 0;
     z-index: 10;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+    backdrop-filter: blur(12px);
   }
   .app-bar .brand {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 11px;
+    min-height: 50px;
     font-weight: 700;
-    font-size: 15px;
+    font-size: 16px;
+    color: var(--text);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .app-bar nav { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+  .app-bar nav a, .app-bar nav button {
+    color: var(--text-dim); text-decoration: none;
+    min-height: 42px; display: inline-flex; align-items: center;
+    padding: 0 13px; border-radius: 10px; font-size: 14px; font-weight: 550;
+    border: 1px solid transparent; background: transparent; font-family: inherit;
+    white-space: nowrap;
+    transition: color .15s ease, background .15s ease, border-color .15s ease;
+    cursor: pointer;
+  }
+  .app-bar nav a:hover, .app-bar nav button:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); transform: none; }
+.app-bar nav a[aria-current="page"] { color: var(--brand-bright); background: color-mix(in srgb, var(--brand-deep) 22%, var(--surface)); border-color: var(--brand-deep); }
+  .header-tools {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .header-primary {
+    display: inline-flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    padding: 0 17px;
+    border: 1px solid var(--accent);
+    border-radius: 11px;
+    background: var(--accent);
     color: #fff;
     text-decoration: none;
+    font-size: 14px;
+    font-weight: 650;
+    box-shadow: 0 3px 10px rgba(32, 135, 61, .2);
+    white-space: nowrap;
   }
-  .app-bar .brand .logo-dot {
-    width: 10px; height: 10px; border-radius: 50%;
-    background: var(--ok, #5fb878);
-    box-shadow: 0 0 6px rgba(95,184,120,.55);
+  .header-primary:hover { background: var(--accent-h); border-color: var(--accent-h); color: #fff; }
+  .header-tools #theme-toggle { min-width: 44px; min-height: 44px; font-size: 14px; }
+  .actions-menu { position: relative; }
+  .actions-menu > summary {
+    list-style: none;
+    display: inline-flex;
+    min-height: 44px;
+    align-items: center;
+    gap: 7px;
+    padding: 0 13px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 550;
+    cursor: pointer;
+    white-space: nowrap;
   }
-  .app-bar nav { display: flex; gap: 6px; flex-wrap: wrap; }
-  .app-bar nav a {
-    color: #cfd8e3; text-decoration: none;
-    padding: 5px 10px; border-radius: 4px; font-size: 13px;
+  .actions-menu > summary::-webkit-details-marker { display: none; }
+  .actions-menu > summary::after { content: "▾"; color: var(--brand-bright); font-size: 12px; }
+  .actions-menu[open] > summary { border-color: var(--brand-deep); }
+  .actions-menu-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 30;
+    display: grid;
+    gap: 6px;
+    width: min(260px, calc(100vw - 28px));
+    padding: 9px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, .35);
+  }
+  .actions-menu-panel button {
+    width: 100%;
+    min-height: 42px;
+    padding: 0 11px;
+    text-align: left;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
     border: 1px solid transparent;
   }
-  .app-bar nav a:hover { background: #2a2a2a; border-color: #3a3a3a; color: #fff; }
-  .app-bar .right-cluster {
-    margin-left: auto; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+.actions-menu-panel button:hover { background: var(--surface-2); border-color: var(--border); transform: none; }
+.app-bar nav button:not(.danger):not(.success) { background: transparent; border-color: transparent; color: var(--text-dim); }
+.app-bar nav button:not(.danger):not(.success):hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+.actions-menu-panel button:not(.danger):not(.success) { background: transparent; border-color: transparent; color: var(--text); }
+.actions-menu-panel button:not(.danger):not(.success):hover { background: var(--surface-2); border-color: var(--border); }
+  .status-bar, #segments-section {
+    grid-column: 1 / -1;
+  }
+  .split-2 {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, .95fr) minmax(0, 1.25fr);
+    gap: 18px;
+  }
+  #detail-section { grid-column: 1; }
+  #mode-section { grid-column: 2; }
+  .app-shell .section { min-height: 360px; }
+  #segments-section { min-height: 480px; }
+  #segments-section, #add-form-panel { scroll-margin-top: 120px; }
+  #seg-list { min-height: 360px; }
+  #add-form-panel textarea { min-height: 200px; }
+  #detail-section #seg-detail { min-height: 360px !important; }
+  #detail-section .seg-diff { min-height: 120px; }
+  .app-shell > .status-bar { grid-column: 1 / -1; }
+  .app-shell > #segments-section { grid-column: 1 / -1; }
+  @media (max-width: 1120px) {
+    .app-bar { gap: 10px; }
+    .app-bar nav { order: 3; flex-basis: 100%; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+    .header-tools { margin-left: auto; }
+  }
+  @media (max-width: 760px) {
+    .app-bar { padding: 10px 12px; }
+    .app-bar nav { order: 3; flex-basis: 100%; }
+    .app-bar nav a, .app-bar nav button { min-height: 40px; padding: 0 10px; font-size: 13px; }
+    .header-tools { gap: 6px; }
+    .header-primary { padding: 0 12px; }
+    .actions-menu-panel { right: 0; }
+    .app-shell { display: block; padding: 12px; }
+    .app-shell > *, .app-shell .section { margin-bottom: 14px; }
+    .app-shell .section { min-height: 360px; padding: 16px; }
+    .app-shell .split-2 > .section { min-height: 360px; }
+    #seg-list { min-height: 300px; }
+    #add-form-panel textarea { min-height: 200px; }
   }
   .status-bar {
     display: flex;
@@ -3350,7 +2959,7 @@ INDEX_HTML = r"""<!doctype html>
   }
   .status-bar .path {
     font-family: ui-monospace, Menlo, Consolas, monospace;
-    color: #6af;
+    color: var(--brand-bright);
     background: #1a1a1a;
     padding: 2px 6px;
     border-radius: 3px;
@@ -3381,8 +2990,8 @@ INDEX_HTML = r"""<!doctype html>
     display: inline-flex;
     align-items: center; justify-content: center;
     width: 20px; height: 20px;
-    background: #2a3a4a;
-    color: #6af;
+    background: #172d1f;
+    color: var(--brand-bright);
     border-radius: 50%;
     font-size: 10px;
     font-weight: 700;
@@ -3396,7 +3005,7 @@ INDEX_HTML = r"""<!doctype html>
     font-weight: 400;
     margin-left: auto;
   }
-  .section h2 .sub a { color: #6af; text-decoration: none; }
+  .section h2 .sub a { color: var(--brand-bright); text-decoration: none; }
   .section h2 .sub a:hover { text-decoration: underline; }
   /* 2-column grid on wide viewports. Single-column on narrow. */
   .section-row {
@@ -3406,7 +3015,7 @@ INDEX_HTML = r"""<!doctype html>
   }
   .section-row > .section { margin: 0; }
   /* Side-by-side split for score-helper + add-form on wide viewports. */
-  .split-2 { display: grid; grid-template-columns: 360px 1fr; gap: 14px; }
+  .split-2 { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.25fr); gap: 18px; }
   .split-2 > .section { margin: 0; }
   @media (max-width: 980px) {
     .split-2 { grid-template-columns: 1fr; }
@@ -3441,7 +3050,7 @@ INDEX_HTML = r"""<!doctype html>
   }
   .seg-item { padding: 10px 12px; border-bottom: 1px solid #1e1e1e; cursor: pointer; }
   .seg-item:hover { background: #1c1c1c; }
-  .seg-item.selected { background: #1f2a36; border-left: 3px solid #6af; }
+  .seg-item.selected { background: #172d1f; border-left: 3px solid #5bec7d; }
   /* Compact bulk checkbox column */
   .seg-item .bulk-cb { margin-right: 8px; transform: scale(1.05); }
   /* Narrow-viewport tweaks: hide secondary header items, collapse status. */
@@ -3455,17 +3064,95 @@ INDEX_HTML = r"""<!doctype html>
     .seg-toolbar input[type="search"], .seg-toolbar #search { width: 100%; }
   }
 
+  .app-bar {
+    padding: 10px clamp(14px, 2.4vw, 32px);
+    gap: 18px;
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    border-bottom-color: var(--border);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
+    backdrop-filter: blur(12px);
+  }
+  .app-bar .brand {
+    gap: 11px;
+    min-height: 44px;
+    color: var(--text);
+    letter-spacing: .01em;
+  }
+  .app-bar .brand-mark {
+    display: block;
+    width: 50px;
+    height: 50px;
+    flex: 0 0 50px;
+    object-fit: contain;
+    padding: 3px;
+    box-sizing: border-box;
+    background: #050705;
+    border: 1px solid rgba(116, 205, 112, .28);
+    border-radius: 10px;
+    filter: drop-shadow(0 2px 6px rgba(68, 189, 93, .2));
+  }
+  .app-bar nav a, .app-bar nav button {
+    color: var(--text-dim);
+    padding: 7px 12px;
+    border-radius: 999px;
+    transition: color .15s ease, background .15s ease, border-color .15s ease;
+  }
+  .app-bar nav a:hover, .app-bar nav button:hover {
+    color: var(--text);
+    background: var(--surface-2);
+    border-color: var(--border);
+  }
+  .app-bar .right { gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .app-shell { max-width: 1480px; padding: 20px clamp(14px, 2.4vw, 32px) 40px; gap: 16px; }
+  .status-bar {
+    padding: 10px 14px;
+    background: var(--surface);
+    border-color: var(--border);
+    border-radius: 10px;
+    color: var(--text-dim);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .08);
+  }
+  .status-bar .path { color: var(--brand-bright); background: var(--surface-2); }
+  .status-bar .sep { color: var(--border); }
+  .section {
+    background: var(--surface);
+    border-color: var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    box-shadow: 0 5px 18px rgba(0, 0, 0, .09);
+  }
+  .section h2 { color: var(--brand-deep); }
+  .section h2 .num { background: var(--surface-2); color: var(--brand-bright); }
+  .section h2 .sub { color: var(--text-dim); }
+  .section h2 .sub a { color: var(--accent-h); }
+  .seg-toolbar { border-bottom-color: var(--border); }
+  .seg-toolbar label { color: var(--text-dim); }
+  .seg-toolbar .hint { color: var(--text-dim); }
+  #seg-list { border-color: var(--border); border-radius: 8px; background: var(--surface-2); }
+  .seg-item { border-bottom-color: var(--border); background: var(--surface); }
+  .seg-item:hover { background: var(--surface-2); }
+  .seg-item.selected { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); border-left-color: var(--brand-bright); }
+  @media (max-width: 760px) {
+    .app-bar { gap: 8px; }
+    .app-bar .brand-mark { width: 42px; height: 42px; flex-basis: 42px; }
+    .app-bar .right { justify-content: flex-start; }
+    .section { padding: 14px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+  }
+
   /* ---- Step 1 design tokens (A4 session badge + A5 health banner) ---- */
   /* These are additive — they don't override any existing rule. */
   :root {
-    --ok: #5fb878;
-    --ok-bg: #1a2a1f;
+    --ok: #5bec7d;
+    --ok-bg: #172d1f;
     --warn: #d9a441;
     --warn-bg: #2a241a;
     --down: #c45858;
     --down-bg: #2a1a1a;
     --idle: #888;
-    --idle-bg: #1d1d1d;
+    --idle-bg: #202923;
     --pill-fg: #ddd;
   }
   .pill {
@@ -3558,8 +3245,8 @@ INDEX_HTML = r"""<!doctype html>
   }
   #scorecard-panel .sc-pill:hover { background: #2a2a2a; border-color: #444; }
   #scorecard-panel .sc-pill.on {
-    background: #2a3a4a; border-color: #4a6a8a; color: #fff;
-    box-shadow: inset 0 0 0 1px rgba(106,170,255,.25);
+    background: #172d1f; border-color: #5bec7d; color: #fff;
+    box-shadow: inset 0 0 0 1px rgba(91,236,125,.25);
   }
   #scorecard-panel .sc-actions {
     display: flex; gap: 8px; align-items: center;
@@ -3588,7 +3275,7 @@ INDEX_HTML = r"""<!doctype html>
     letter-spacing: .05em; font-weight: 600;
   }
   #scorecard-panel .sc-box .k {
-    font-size: 9px; color: #6af; text-transform: uppercase;
+    font-size: 9px; color: var(--brand-bright); text-transform: uppercase;
     letter-spacing: .04em; margin-top: 1px;
   }
   #scorecard-panel .sc-box .v {
@@ -3602,11 +3289,11 @@ INDEX_HTML = r"""<!doctype html>
   /* Color hints for the import score box (box 2). */
   #scorecard-panel .sc-box.score-high   .v { color: #c66; }
   #scorecard-panel .sc-box.score-mid    .v { color: #fc6; }
-  #scorecard-panel .sc-box.score-stc    .v { color: #6cf; }
+  #scorecard-panel .sc-box.score-stc    .v { color: var(--brand-bright); }
   #scorecard-panel .sc-box.score-eph    .v { color: #c9f; }
   /* Pop on/off boxes (5, 6, 7) — solid color when on, faded when off. */
-  #scorecard-panel .sc-box.pop-on .v { color: #6c6; }
-  #scorecard-panel .sc-box.pop-on { background: #1a2a1f; border-color: rgba(95,184,120,.35); }
+  #scorecard-panel .sc-box.pop-on .v { color: var(--brand-bright); }
+  #scorecard-panel .sc-box.pop-on { background: #172d1f; border-color: rgba(91,236,125,.35); }
   #scorecard-panel .sc-box.pop-off .v { color: #555; }
 
   #scorecard-panel .sc-reasoning {
@@ -3616,7 +3303,7 @@ INDEX_HTML = r"""<!doctype html>
   }
   #scorecard-panel .sc-reasoning:empty { display: none; }
   #scorecard-panel .sc-tier {
-    font-size: 12px; color: #6c6; font-weight: 600;
+    font-size: 12px; color: var(--brand-bright); font-weight: 600;
   }
 
   /* Mobile: 7 boxes become 4+3 stack to avoid cramping. */
@@ -3663,9 +3350,9 @@ INDEX_HTML = r"""<!doctype html>
   }
   .rb-head button.danger:hover { background: #5a2a2a; }
   .rb-head button.primary {
-    background: #2a4a7a; border-color: #4a6a8a; color: #fff;
+    background: #246f3a; border-color: #5bec7d; color: #fff;
   }
-  .rb-head button.primary:hover { background: #345a8a; }
+  .rb-head button.primary:hover { background: #35b95a; }
   .rb-body { overflow: auto; padding: 8px 0; }
   .rb-empty {
     padding: 32px; text-align: center; color: #888;
@@ -3694,8 +3381,8 @@ INDEX_HTML = r"""<!doctype html>
     padding: 3px 8px; font-size: 11.5px; border-radius: 3px; cursor: pointer;
   }
   .rb-row .rb-actions button:hover { background: #444; }
-  .rb-row .rb-actions button.restore { background: #2a4a2a; border-color: #4a6a4a; color: #cfc; }
-  .rb-row .rb-actions button.restore:hover { background: #345a3a; }
+  .rb-row .rb-actions button.restore { background: #246f3a; border-color: #5bec7d; color: #e5ede7; }
+  .rb-row .rb-actions button.restore:hover { background: #35b95a; }
   .rb-row .rb-actions button.purge { background: #5a2020; border-color: #7a3030; color: #fcc; }
   .rb-row .rb-actions button.purge:hover { background: #6a2828; }
   /* Mobile: stack the row. */
@@ -3772,11 +3459,11 @@ INDEX_HTML = r"""<!doctype html>
   }
   .seg-diff .diff-empty { color: #666; font-style: italic; }
   .seg-diff .diff-line { display: block; padding: 1px 6px; border-radius: 2px; }
-  .seg-diff .diff-added { background: #1a3a1a; color: #6c6; }
+  .seg-diff .diff-added { background: #172d1f; color: #5bec7d; }
   .seg-diff .diff-removed { background: #3a1a1a; color: #c66; text-decoration: line-through; }
   .seg-diff .diff-changed { background: #3a2a1a; color: #fc6; }
   .seg-diff .diff-same { color: #888; }
-  .seg-diff .diff-field { color: #6af; font-weight: 600; }
+  .seg-diff .diff-field { color: var(--brand-bright); font-weight: 600; }
   body[data-theme="light"] .seg-diff { background: #f8f8f8; border-color: #ddd; color: #333; }
   body[data-theme="light"] .seg-diff .diff-empty { color: #999; }
   body[data-theme="light"] .seg-diff .diff-added { background: #e8f5e8; color: #282; }
@@ -3793,35 +3480,35 @@ INDEX_HTML = r"""<!doctype html>
     padding: 1px 6px;
     font-size: 10px;
     font-weight: bold;
-    color: #6af;
-    background: #1a2a3a;
-    border: 1px solid #2a4a6a;
+    color: var(--brand-bright);
+    background: #172d1f;
+    border: 1px solid #246f3a;
     border-radius: 3px;
     text-decoration: none;
     cursor: pointer;
     vertical-align: middle;
   }
-  .seg-item .mod-link:hover { background: #2a4a6a; color: #cef; }
+  .seg-item .mod-link:hover { background: #246f3a; color: #fff; }
 
   /* B3: bulk-action bar (above the segment list, sticky-ish) */
   #bulk-bar {
     display: none;
     padding: 8px 12px;
     margin-bottom: 8px;
-    background: #2a2a1a;
-    border: 1px solid #6a6a2a;
+    background: #172d1f;
+    border: 1px solid #246f3a;
     border-radius: 4px;
     font-family: monospace;
     font-size: 12px;
-    color: #ff8;
+    color: #b9f5c7;
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
   }
   #bulk-bar.show { display: flex; }
-  #bulk-bar b { color: #ffd; }
+  #bulk-bar b { color: #5bec7d; }
   #bulk-bar button {
-    background: #4a4a2a; color: #ffd; border: 1px solid #8a8a4a;
+    background: #246f3a; color: #fff; border: 1px solid #5bec7d;
     padding: 4px 10px; font-size: 12px; cursor: pointer; border-radius: 3px;
   }
   #bulk-bar button.danger { background: #4a2a2a; color: #fcc; border-color: #8a4a4a; }
@@ -3838,9 +3525,9 @@ INDEX_HTML = r"""<!doctype html>
     padding: 1px 5px;
     font-size: 10px;
     font-family: monospace;
-    color: #fa6;
-    background: #2a1a0a;
-    border: 1px solid #6a4a2a;
+    color: #5bec7d;
+    background: #172d1f;
+    border: 1px solid #246f3a;
     border-radius: 3px;
     vertical-align: middle;
   }
@@ -3873,7 +3560,7 @@ INDEX_HTML = r"""<!doctype html>
     flex-wrap: wrap;
   }
   #sort-controls select {
-    background: #222; color: #6af; border: 1px solid #444;
+    background: #232d26; color: var(--brand-bright); border: 1px solid #334239;
     padding: 2px 6px; font-size: 12px; border-radius: 3px;
   }
   #sort-controls label { color: #888; font-size: 11px; }
@@ -3886,57 +3573,91 @@ INDEX_HTML = r"""<!doctype html>
     padding: 1px 7px;
     font-size: 10px;
     font-weight: bold;
-    color: #fc6;
-    background: #2a1a0a;
-    border: 1px solid #6a4a2a;
+    color: #5bec7d;
+    background: #172d1f;
+    border: 1px solid #246f3a;
     border-radius: 3px;
     text-decoration: none;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     vertical-align: middle;
   }
-  .score-cta:hover { background: #3a2a1a; color: #ffd; }
+  .score-cta:hover { background: #246f3a; color: #fff; }
+  .status-bar .status-refresh {
+    min-height: 40px;
+    padding: 0 13px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  @media (max-width: 760px) {
+    .app-bar .header-tools {
+      order: 2;
+      flex: 1 0 100%;
+      width: 100%;
+      margin-left: 0;
+      justify-content: flex-start;
+    }
+    .app-bar nav {
+      order: 3;
+      flex: 1 0 100%;
+      min-width: 0;
+      overflow-x: auto;
+      flex-wrap: nowrap;
+    }
+    .app-bar nav a, .app-bar nav button {
+      min-height: 44px;
+      padding: 0 12px;
+      font-size: 14px;
+    }
+    .header-primary, .actions-menu > summary, .header-tools #theme-toggle {
+      min-height: 44px;
+    }
+    .app-shell .section { min-height: 360px; }
+    #segments-section { min-height: 480px; }
+    #seg-list { min-height: 360px; }
+    #detail-section #seg-detail { min-height: 360px !important; }
+  }
 </style>
 </head>
 <body>
 <header class="app-bar" role="banner">
   <a href="/" class="brand" title="Vecretary Memory Dashboard — home">
-    <span class="logo-dot" aria-hidden="true"></span>
+    <img class="brand-mark" src="/assets/vecretary-logo.png" alt="">
     Vecretary Memory
   </a>
-  <div class="center">
-    <nav aria-label="Primary">
-      <a href="/score" title="Open the score helper page (Q1/Q2 wizard)">+ New</a>
-      <a href="/decay" title="Open the decay curve visualiser + band editor">/decay</a>
-      <a href="#" onclick="loadRecycled(); return false" id="recycle-link" title="View soft-deleted segments">♻ Recycle</a>
-    </nav>
-  </div>
-  <div class="right">
+  <nav class="primary-nav" aria-label="Primary dashboard">
+    <a href="/" aria-current="page">Overview</a>
+    <a href="#segments-section">Memories</a>
+    <a href="/score">Score helper</a>
+    <a href="/decay">Decay</a>
+    <button type="button" class="nav-action" id="recycle-link" aria-haspopup="dialog" aria-controls="rb-overlay" onclick="loadRecycled()">Recycle bin</button>
+  </nav>
+  <div class="header-tools" role="group" aria-label="Dashboard actions">
     <span id="session-badge" class="pill idle" title="Session clock: drives decay tick + pop math. Updated on every tool call and dashboard interaction.">
       <span class="dot"></span><span class="label">session</span>
     </span>
-    <button id="theme-toggle" onclick="toggleTheme()" title="Toggle light / dark theme (keyboard: t)">☀</button>
-    <button id="export-btn" onclick="exportJson()" title="Export all segments as JSON (keyboard: x)">⇩ JSON</button>
-    <button id="pop-search-btn" onclick="onPopSearch()" title="Audit pop activity on the current search result">⚡ Pop audit</button>
-    <button onclick="pullMandatory()" title="Simulate retrieving every mandatory (score-100) segment. Drops them to 79 and they re-elevate on the next nudge tick.">⭐ Pull mandatory</button>
-    <button onclick="runNudge()" title="Check due mandatory elevations without advancing the turn counter">Nudge check</button>
-    <button onclick="loadList()" title="Re-fetch the segment list from the store">↻ Refresh</button>
+    <a class="header-primary" href="#add-form-panel">+ New memory</a>
+    <button id="theme-toggle" onclick="toggleTheme()" aria-label="Toggle color theme" title="Toggle light / dark theme (keyboard: t)">☀</button>
+    <details class="actions-menu">
+      <summary>More actions</summary>
+      <div class="actions-menu-panel" role="group" aria-label="Additional dashboard actions">
+        <button type="button" id="export-btn" onclick="exportJson()" title="Export all segments as JSON (keyboard: x)">Export JSON</button>
+        <button type="button" id="pop-search-btn" onclick="onPopSearch()" title="Audit pop activity on the current search result">Pop audit</button>
+        <button type="button" onclick="pullMandatory()" title="Simulate retrieving every mandatory (score-100) segment">Pull mandatory</button>
+        <button type="button" onclick="runNudge()" title="Check due mandatory elevations without advancing the turn counter">Nudge check</button>
+        <button type="button" onclick="loadList()" title="Re-fetch the segment list from the store">Refresh list</button>
+      </div>
+    </details>
   </div>
 </header>
 
 <div id="readonly-banner" style="display:none;padding:10px 16px;background:#3a2a2a;border-bottom:2px solid #b03030;color:#fcc;font-family:monospace;font-size:13px">
-  <b>⚠ READ-ONLY mode</b> — the Vecretary Memory MCP server (or another process) holds the writer lock for this store.
+  <b>⚠ READ-ONLY mode</b> — this SQLite service was started as an observer.
   Browse, search, and view KPIs are enabled. <b>Writes are disabled</b> (Save / Delete / Update / Add / Pop / Tick will return 409).
-  To enable writes, close the MCP server (or other holder) and restart the dashboard.
-  <br><br>
-  <!-- Step 6 (D1): auto-recover button. Calls /api/mode/auto_acquire which
-       polls the writer lock with exponential backoff and acquires the moment
-       it's free. Up to ~60s wait. -->
-  <button id="auto-acquire-btn" onclick="onAutoAcquire()" title="Poll writer lock and auto-take control when MCP releases (max 60s)" style="background:#4a2a2a;color:#fcc;border:1px solid #8a4a4a;padding:4px 12px;cursor:pointer;border-radius:3px;font-family:monospace;font-size:12px;margin-right:8px">⏳ Wait for MCP to release (auto-acquire)</button>
-  <span id="auto-acquire-status" style="font-size:11px;color:#fa6"></span>
+  Start a separate owner SQLite service only after reviewing the current writer/session state.
 </div>
 
-<div id="search-banner" style="display:none;padding:10px 16px;background:#1a2a1a;border-bottom:1px solid #2a4a2a;color:#cfc;font-family:monospace;font-size:13px"></div>
+<div id="search-banner" style="display:none;padding:10px 16px;background:#172d1f;border-bottom:1px solid #246f3a;color:#b9f5c7;font-family:monospace;font-size:13px"></div>
 
 <main class="app-shell">
 
@@ -3952,7 +3673,7 @@ INDEX_HTML = r"""<!doctype html>
       <span class="kv muted" id="hb-embed">embed ?</span>
       <span class="kv muted" id="hb-pid">pid ?</span>
     </span>
-    <button onclick="pollHealthNow()" title="Refresh health + session badge right now" style="padding:3px 8px;font-size:11px">↻ refresh</button>
+    <button class="status-refresh" type="button" onclick="pollHealthNow()" title="Refresh health and session status now">Refresh status</button>
     <span class="path" id="stats" title="On-disk store path">loading…</span>
   </div>
 
@@ -4111,18 +3832,12 @@ INDEX_HTML = r"""<!doctype html>
     </div>
   </section>
 
-  <!-- SECTION 5: Mode controls (Edit Store / Back to MCP) -->
+  <!-- SECTION 5: Single SQLite service ownership status -->
   <section class="section" id="mode-section" aria-label="Dashboard mode">
     <h2><span class="num">5</span> Mode
       <span class="sub" id="mode-status">checking mode…</span>
     </h2>
-    <div class="actions">
-      <button onclick="takeControlFromUI()" id="edit-store-btn" title="Acquire a free writer lock and switch the dashboard to write mode">Edit Store</button>
-      <button onclick="backToMcpFromUI()" id="back-mcp-btn" title="Release the writer lock and return control to the MCP server (dashboard goes read-only)">Back to MCP</button>
-      <label id="prefer-ro-wrap" title="Read-only preference: when on, the dashboard UI hides write actions and shows a banner explaining the preference. Use 'Edit Store' to override per-session." style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#aaa;margin-left:8px;">
-        <input type="checkbox" id="prefer-ro-toggle"> Prefer read-only
-      </label>
-    </div>
+    <p>MCP and dashboard requests share the same SQLite service owner. Separate writer handoff is not available.</p>
   </section>
 </main>
 
@@ -4178,15 +3893,6 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </div>
 
-<section class="section" aria-label="Owner maintenance">
-  <details><summary>Owner maintenance — reset selected store</summary>
-    <p>Reset permanently removes active memories. Private backup copies are retained, but full Chroma/WAL restore is not certified. Export and review your recovery plan first.</p>
-    <label><input id="reset-include-recycle" type="checkbox"> Also permanently remove recycled memories</label>
-    <button onclick="previewReset()">Preview reset (no changes)</button>
-    <button onclick="confirmReset()" data-instinct-write="1">Reset after confirmation</button>
-    <pre id="reset-preview"></pre>
-  </details>
-</section>
 <div class="toast" id="toast" style="display:none" aria-hidden="true"></div>
 <script>
 let allSegs = [];
@@ -4359,7 +4065,7 @@ function renderSparkline(s) {
   const yMax = 100, yMin = 0;
   const y1 = h - ((init - yMin) / (yMax - yMin)) * (h - 2) - 1;
   const y2 = h - ((cur - yMin) / (yMax - yMin)) * (h - 2) - 1;
-  const stroke = (cur < init) ? '#6af' : (cur > init ? '#fa6' : '#888');
+  const stroke = (cur < init) ? 'var(--brand-bright)' : (cur > init ? '#fa6' : '#888');
   const title = `Decay preview: ${init} → ${cur} over ${eff.toFixed(1)}h active (click for full chart)`;
   return `<a href="/decay?id=${encodeURIComponent(s.id)}" title="${escapeHtml(title)}" onclick="event.stopPropagation()"><svg class="sparkline" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg"><polyline points="${x1},${y1} ${x2},${y2}" fill="none" stroke="${stroke}" stroke-width="1.2"/></svg></a>`;
 }
@@ -5254,36 +4960,7 @@ document.getElementById('kb-overlay').addEventListener('click', (ev) => {
 });
 
 // Step 7 (C3) — Read-only preference.
-// When enabled, the dashboard stays in read-only observation mode even
-// if it owns the writer lock — all write buttons are hidden, all writes
-// are blocked client-side, and a banner explains the preference. This
-// is useful for users who primarily browse data without modifying it.
-// The user can still override per-session by clicking 'Edit Store'.
-const LS_PREFER_RO = 'instinct:preferReadOnly';
-function applyPreferRo(on) {
-  document.body.setAttribute('data-prefer-ro', on ? '1' : '0');
-  // Hide write-action buttons when the preference is on.
-  dashboardApplyWriteState();
-  // Show a small banner explaining the preference.
-  let banner = document.getElementById('prefer-ro-banner');
-  if (!banner) {
-    banner = document.createElement('div');
-    banner.id = 'prefer-ro-banner';
-    banner.style.cssText = 'padding:6px 12px;background:#1a2a3a;color:#6af;font-size:11px;border-bottom:1px solid #2a4a6a;text-align:center';
-    banner.innerHTML = 'ℹ Read-only preference is ON — write actions are disabled. Click <b>Edit Store</b> to override, or uncheck the box below.';
-    const main = document.querySelector('main.app-shell') || document.querySelector('main');
-    if (main) main.insertBefore(banner, main.firstChild);
-  }
-  banner.style.display = on ? 'block' : 'none';
-  const t = document.getElementById('prefer-ro-toggle');
-  if (t) t.checked = !!on;
-}
-function initPreferRo() {
-  let on = false;
-  try { on = localStorage.getItem(LS_PREFER_RO) === '1'; } catch {}
-  applyPreferRo(on);
-}
-
+// Client-side state is synchronized with the SQLite observer/owner role.
 async function saveNudge() {
   try {
     const id = document.getElementById('f-id').value;
@@ -5298,28 +4975,6 @@ async function runNudge() {
   try { const result = await api('/api/nudge/run', {method:'POST', body:{}}); toast(JSON.stringify(result)); await loadList(); }
   catch (error) { toast(String(error), true); }
 }
-async function previewReset() {
-  try {
-    const result = await api('/api/admin/reset', {method:'POST', body:{dry_run:true, include_recycle:document.getElementById('reset-include-recycle').checked}});
-    document.getElementById('reset-preview').textContent = JSON.stringify(result, null, 2);
-  } catch (error) { toast(String(error), true); }
-}
-async function confirmReset() {
-  if (!document.getElementById('reset-preview').textContent) { toast('Preview the reset first', true); return; }
-  if (prompt('Permanently reset this store? Type RESET to confirm. Backups are not certified full restores.') !== 'RESET') return;
-  try {
-    const result = await api('/api/admin/reset', {method:'POST', body:{dry_run:false, include_recycle:document.getElementById('reset-include-recycle').checked}});
-    if (!result.ok) throw new Error(result.error || 'Reset was not confirmed');
-    document.getElementById('reset-preview').textContent = JSON.stringify(result, null, 2);
-    resetForm(); await loadList(); await loadStats(); toast('Reset completed');
-  } catch (error) { toast(String(error), true); }
-}
-document.getElementById('prefer-ro-toggle').addEventListener('change', (ev) => {
-  try { localStorage.setItem(LS_PREFER_RO, ev.target.checked ? '1' : '0'); } catch {}
-  applyPreferRo(ev.target.checked);
-  toast(`Read-only preference: ${ev.target.checked ? 'on' : 'off'}`, { duration: 1500 });
-});
-
 // Step 7 (C4) — Light/dark theme toggle.
 // Preference is stored in localStorage under 'instinct:theme'. Default is
 // 'dark' (matches the current palette). Toggling flips the body[data-theme]
@@ -5349,7 +5004,6 @@ function toggleTheme() {
 })();
 
 // Step 7 (C3) — restore the read-only preference on load.
-initPreferRo();
 
 // Step 7 (C5) — JSON export. Downloads all segments (active + recycled) as
 // a single .json file the user can keep or feed back into the store later.
@@ -5513,12 +5167,12 @@ function renderRetrieverResult(d) {
   } else {
     const pops = (d.pop_results || []).map(p => {
       const ruleColor = ({
-        'mandatory_bump': '#fc6', 'halve': '#6cf', 'jump_to_plateau': '#f96',
+        'mandatory_bump': '#fc6', 'halve': 'var(--brand-bright)', 'jump_to_plateau': '#f96',
         'frequency_reset': '#f66', 'none': '#888',
       })[p.rule_applied] || '#fff';
       return `<span style="color:${ruleColor}">${escapeHtml(p.rule_applied)}</span> on <b>${escapeHtml((p.segment_title || '').slice(0, 40))}</b> (matched=${escapeHtml(p.matched_keywords)})`;
     }).join('; ');
-    banner.innerHTML = `<b>Retriever result</b>: mandatory=${d.mandatory_count}, relevant=${d.relevant_count}, <b style="color:#6f6">pops=${d.pop_count}</b> — ${pops} &nbsp; <a href="#" onclick="showPopAudit(lastRetrieverResult); return false" style="color:#6af">details →</a>`;
+    banner.innerHTML = `<b>Retriever result</b>: mandatory=${d.mandatory_count}, relevant=${d.relevant_count}, <b style="color:var(--brand-bright)">pops=${d.pop_count}</b> — ${pops} &nbsp; <a href="#" onclick="showPopAudit(lastRetrieverResult); return false" style="color:var(--brand-bright)">details →</a>`;
     banner.style.background = '#2a3a2a';
   }
   banner.style.display = 'block';
@@ -5560,19 +5214,19 @@ function showPopAudit(d) {
   card.style.cssText = 'background:#1e1e1e;color:#ddd;border:1px solid #555;border-radius:6px;padding:18px;max-width:780px;max-height:80vh;overflow:auto;font-family:monospace;font-size:13px';
 
   const header = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-    <b style="color:#6af">Pop audit</b>
+    <b style="color:var(--brand-bright)">Pop audit</b>
     <button onclick="document.getElementById('pop-audit-overlay').remove()" style="background:#444;color:#ddd;border:1px solid #666;padding:4px 10px;cursor:pointer">×</button>
   </div>`;
 
   const summary = `<div style="margin-bottom:10px;padding:8px;background:#222;border-radius:4px">
     <b>Query:</b> <code>${(d.query || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'})[c])}</code><br>
-    <b>Mandatory:</b> ${d.mandatory_count} &nbsp; <b>Relevant:</b> ${d.relevant_count} &nbsp; <b>Pops fired:</b> <span style="color:${d.pop_count > 0 ? '#6f6' : '#888'}">${d.pop_count}</span>
+    <b>Mandatory:</b> ${d.mandatory_count} &nbsp; <b>Relevant:</b> ${d.relevant_count} &nbsp; <b>Pops fired:</b> <span style="color:${d.pop_count > 0 ? 'var(--brand-bright)' : '#888'}">${d.pop_count}</span>
   </div>`;
 
   const popList = (d.pop_results || []).map(p => {
     const ruleColor = ({
       'mandatory_bump': '#fc6',
-      'halve': '#6cf',
+      'halve': 'var(--brand-bright)',
       'jump_to_plateau': '#f96',
       'frequency_reset': '#f66',
       'none': '#888',
@@ -5611,7 +5265,7 @@ function showPopAudit(d) {
       const ids = ['save-btn', 'del-btn'];
       ids.forEach(id => {
         const el = document.getElementById(id);
-        if (el) { el.disabled = true; el.title = 'read-only mode: writer lock held elsewhere'; }
+        if (el) { el.disabled = true; el.title = 'read-only SQLite observer'; }
       });
     }
   } catch (e) { /* non-fatal */ }
@@ -5759,46 +5413,6 @@ async function pollHealthNow() {
   // overkill — the next scheduled tick will fire normally.
 }
 
-// ---- Step 6 (D1) — auto-acquire handler ----
-// Polls /api/mode/auto_acquire (which polls the writer lock with
-// exponential backoff). When the lock frees, the dashboard upgrades
-// to write mode and we reload the page so the read-only banner
-// disappears and write buttons re-enable.
-async function onAutoAcquire() {
-  const btn = document.getElementById('auto-acquire-btn');
-  const status = document.getElementById('auto-acquire-status');
-  if (btn.disabled) return;  // already waiting
-  btn.disabled = true;
-  btn.textContent = '⏳ waiting for lock…';
-  status.textContent = '';
-  try {
-    // Default 60s wait. Long enough for the MCP server to finish a
-    // tool call and release. Caller can click again if needed.
-    const r = await api('/api/mode/auto_acquire', {
-      method: 'POST', body: { max_wait_seconds: 60 },
-    });
-    if (r.acquired) {
-      status.textContent = `✓ acquired after ${r.waited_seconds}s — reloading…`;
-      status.style.color = '#6f6';
-      toast('Acquired writer lock — reloading into write mode', { success: true });
-      // Reload after a beat so the toast is visible.
-      setTimeout(() => location.reload(), 1200);
-    } else {
-      status.textContent = `✗ still locked after ${r.waited_seconds}s (holder pid=${r.holder_pid || '?'})`;
-      status.style.color = '#fa6';
-      toast('Auto-acquire timed out: another process still holds the lock', { error: true });
-      btn.disabled = false;
-      btn.textContent = '⏳ Wait for MCP to release (auto-acquire)';
-    }
-  } catch (e) {
-    status.textContent = '✗ ' + e.message;
-    status.style.color = '#f88';
-    btn.disabled = false;
-    btn.textContent = '⏳ Wait for MCP to release (auto-acquire)';
-    toast('Auto-acquire failed: ' + e.message, { error: true });
-  }
-}
-
 // ---- Step 6 (D4) — degraded-state surface in the health banner ----
 // If /api/health reports degraded_reasons, show them in a tooltip on
 // the pill and colour it amber. Distinct from read-only (which is a
@@ -5824,57 +5438,9 @@ function applyDegradedState(reasons) {
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Vecretary Memory local browser dashboard")
-    parser.add_argument("--data-dir", help="Memory data directory (overrides environment)")
-    parser.add_argument("--port", type=int, default=PORT, help="Loopback port (default: 8765)")
-    parser.add_argument("--reset", action="store_true", help="Reset the selected isolated store")
-    parser.add_argument("--include-recycle", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    arguments = parser.parse_args()
-    global PERSIST_DIR, RECOVERY_FILE
-    if arguments.data_dir:
-        os.environ["INSTINCT_DATA_DIR"] = arguments.data_dir
-    PERSIST_DIR = default_data_dir()
-    RECOVERY_FILE = Path(PERSIST_DIR) / ".dashboard_recovery.json"
-    port = arguments.port
-    if not 0 <= port <= 65535:
-        parser.error("port must be between 0 and 65535")
-
-
-
-
-
-    if arguments.reset:
-        include = arguments.include_recycle
-        dry = arguments.dry_run
-        sys.exit(cmd_reset(include_recycle=include, dry_run=dry))
-
-
-    _recover_on_startup()
-
-    _start_watchdog()
-
-    store = get_store()
-    print(f"[dashboard] store ready: {store.count()} segments at {PERSIST_DIR}", file=sys.stderr)
-    print(f"[dashboard] starting on http://{HOST}:{port}", file=sys.stderr)
-    srv = DashboardHTTPServer((HOST, port), Handler)
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-
-
-        global _in_write_session
-        with _heartbeat_lock:
-            was_in_session = _in_write_session
-        if was_in_session:
-            print("[dashboard] shutdown: was in write session, returning control to MCP", file=sys.stderr)
-            try:
-                return_control()
-            except Exception as e:
-                print("[dashboard] shutdown: return_control failed; details withheld", file=sys.stderr)
+    """Compatibility entrypoint for the explicitly configured SQLite service."""
+    from .sqlite_service import cli
+    return cli()
 
 
 if __name__ == "__main__":

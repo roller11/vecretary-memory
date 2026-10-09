@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import tomllib
 
 import pytest
 
@@ -17,10 +18,13 @@ spec.loader.exec_module(export)
 @pytest.fixture
 def source(tmp_path):
     root = tmp_path / 'source'
-    for name in export.FIXED:
+    for name in set(export.FIXED) | set(export.SQLITE_OVERRIDES) | export.BINARY_FILES:
         file = root / name
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text('Synthetic reviewed content', encoding='utf-8')
+        if name in export.BINARY_FILES:
+            file.write_bytes(b'\x89PNG\r\n\x1a\n\x00\xffsynthetic-art')
+        else:
+            file.write_text('Synthetic reviewed content', encoding='utf-8')
     (root / 'tests').mkdir(exist_ok=True)
     return root
 
@@ -80,8 +84,46 @@ def test_reviewed_funding_survives_export(source, tmp_path):
     assert (target / '.github/FUNDING.yml').read_text() == 'github: roller11\n'
 
 
+def test_migration_guide_survives_export(source, tmp_path):
+    guide = source / 'docs/SQLITE_MIGRATION.md'
+    guide.write_text('Offline migration and rollback boundaries', encoding='utf-8')
+    target = tmp_path / 'draft'
+    report = export.prepare(source, target)
+
+    assert (target / 'docs/SQLITE_MIGRATION.md').read_bytes() == guide.read_bytes()
+    assert any(entry['path'] == 'docs/SQLITE_MIGRATION.md' for entry in report['files'])
+
+
+def test_supplied_logo_assets_export_byte_for_byte_with_hashes(source, tmp_path):
+    target = tmp_path / 'draft'
+    report = export.prepare(source, target)
+
+    for name in export.BINARY_FILES:
+        raw = (target / name).read_bytes()
+        assert raw.startswith(b'\x89PNG\r\n\x1a\n')
+        entry = next(item for item in report['files'] if item['path'] == name)
+        assert entry['bytes'] == len(raw)
+        assert entry['sha256'] == export.hashlib.sha256(raw).hexdigest()
+
+
+def test_sqlite_release_profile_packages_logo_assets_and_sdist_files(source, tmp_path):
+    (source / 'docs/sqlite-release/pyproject.toml').write_text(
+        '[tool.setuptools.package-data]\ninstinct = ["starter_memories.json", "assets/*.png"]\n',
+        encoding='utf-8',
+    )
+    (source / 'MANIFEST.in').write_text(
+        'recursive-include instinct/assets *.png\n', encoding='utf-8',
+    )
+    target = tmp_path / 'draft'
+    export.prepare(source, target)
+
+    config = tomllib.loads((target / 'pyproject.toml').read_text(encoding='utf-8'))
+    assert 'assets/*.png' in config['tool']['setuptools']['package-data']['instinct']
+    assert 'recursive-include instinct/assets *.png' in (target / 'MANIFEST.in').read_text(encoding='utf-8')
+
+
 def test_unreviewed_binary_asset_is_not_exported(source, tmp_path):
-    (source / 'instinct/assets').mkdir(parents=True)
+    (source / 'instinct/assets').mkdir(parents=True, exist_ok=True)
     (source / 'instinct/assets/private.png').write_bytes(b'Private')
     target = tmp_path / 'draft'
     export.prepare(source, target)

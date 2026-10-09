@@ -8,6 +8,10 @@ from instinct import session_timer
 from instinct.active_time import capture_anchors, elapsed_hours, set_anchor
 from instinct.dormancy import config_for, current_effective_score
 from instinct.models import ScoredSegment, Segment, SegmentType
+from instinct.sqlite_records import EmbeddingIdentity
+from instinct.sqlite_runtime import SQLiteSegmentAdapter
+from instinct.sqlite_store import SQLiteRecordStore
+from instinct.sqlite_writes import BoundDocumentEmbedder
 
 
 @pytest.fixture
@@ -22,6 +26,30 @@ def note(score=70):
         segment=Segment(content="Synthetic active-clock test", segment_type=SegmentType.CONTEXT),
         importance_score=score, concept_title="Synthetic clock note",
     )
+
+
+class FixedDocumentProvider:
+    def name(self):
+        return 'synthetic'
+
+    def get_config(self):
+        return {'provider': 'synthetic', 'model_name': 'fixed'}
+
+    def supported_spaces(self):
+        return ['cosine']
+
+    def embed_documents(self, documents):
+        return [[1, 0] for _ in documents]
+
+
+@pytest.fixture
+def sqlite_store(clock):
+    identity = EmbeddingIdentity('synthetic', 'fixed', 2, 'cosine')
+    with SQLiteRecordStore.create(clock / 'sqlite', identity) as repository:
+        yield SQLiteSegmentAdapter(
+            repository, persist_dir=clock,
+            document_embedder=BoundDocumentEmbedder(identity, FixedDocumentProvider()),
+        )
 
 
 def advance(clock, minutes, start=None):
@@ -191,10 +219,8 @@ def test_legacy_pop_does_not_trigger_from_wall_clock_age(clock):
     assert not PopModifier(persist_dir=clock).should_pop(memory, datetime(2026, 10, 3))
 
 
-def test_persisted_score_updates_rebase_the_decay_curve(clock):
-    from tests.test_dashboard_features import FeatureCollection
-    from tests.test_identifier_recycling import make_store
-    store = make_store(FeatureCollection(clock))
+def test_persisted_score_updates_rebase_the_decay_curve(clock, sqlite_store):
+    store = sqlite_store
     end = advance(clock, 60)
     memory = note()
     store.add(memory)
@@ -205,10 +231,8 @@ def test_persisted_score_updates_rebase_the_decay_curve(clock):
     assert current_effective_score(restored, end, config_for(clock)) == 40
 
 
-def test_store_access_persists_its_own_snapshot(clock):
-    from tests.test_dashboard_features import FeatureCollection
-    from tests.test_identifier_recycling import make_store
-    store = make_store(FeatureCollection(clock))
+def test_store_access_persists_its_own_snapshot(clock, sqlite_store):
+    store = sqlite_store
     memory = note()
     store.add(memory)
     end = advance(clock, 60)
@@ -281,11 +305,9 @@ def test_stc_preview_uses_active_hour_expiry(clock, monkeypatch):
     assert series[3]["score"] == 49
 
 
-def test_mandatory_renewal_and_access_drop_rebase_the_curve(clock):
+def test_mandatory_renewal_and_access_drop_rebase_the_curve(clock, sqlite_store):
     from instinct.nudge import renew_mandatory
-    from tests.test_dashboard_features import FeatureCollection
-    from tests.test_identifier_recycling import make_store
-    store = make_store(FeatureCollection(clock))
+    store = sqlite_store
     memory = ScoredSegment(Segment("Synthetic rule", SegmentType.STANDING_INSTRUCTION), 100, "Synthetic rule")
     store.add(memory)
     end = advance(clock, 60)

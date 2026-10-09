@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import http.client
 import json
 from pathlib import Path
+import subprocess
 import sys
 import threading
 
@@ -20,12 +21,38 @@ from instinct.service_binding import bound_store
 from instinct.sqlite_queries import BoundQueryEmbedder
 from instinct.sqlite_records import EmbeddingIdentity
 from instinct.sqlite_runtime import SQLiteSegmentAdapter
-from instinct.sqlite_service import SQLiteService
+from instinct.sqlite_service import SQLiteDashboardHandler, SQLiteDashboardServer, SQLiteService
 from instinct.sqlite_store import SQLiteRecordStore
 from instinct.sqlite_writes import BoundDocumentEmbedder
 
 
 IDENTITY = EmbeddingIdentity('synthetic', 'fixed', 2, 'cosine')
+
+
+def test_sqlite_entrypoint_import_does_not_load_legacy_chroma_backend():
+    code = (
+        'import sys; import instinct; import instinct.sqlite_service; '
+        'import instinct.dashboard; import instinct.mcp_server; '
+        'assert "instinct.store" not in sys.modules; '
+        'assert "instinct.chroma_writer_lock" not in sys.modules; '
+        'assert "chromadb" not in sys.modules'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_legacy_store_is_not_exposed_by_the_sqlite_package():
+    code = (
+        'import sys; import instinct; import instinct.sqlite_service; '
+        'assert "instinct.store" not in sys.modules; '
+        'assert not hasattr(instinct, "InstinctStore")'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 class SyntheticProvider:
@@ -68,8 +95,6 @@ def seed(root):
 @pytest.fixture
 def service(tmp_path, monkeypatch):
     seed(tmp_path)
-    monkeypatch.setattr(mcp_server, 'get_store', lambda: pytest.fail('Legacy store factory used'))
-    monkeypatch.setattr(mcp_server, '_try_upgrade_to_write', lambda store: pytest.fail('Legacy upgrade used'))
     monkeypatch.setattr(instinct, '_default_persist_dir', lambda: pytest.fail('Default storage path used'))
     with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
                        read_only=False, **bindings()) as instance:
@@ -115,7 +140,13 @@ async def test_mcp_dispatch_reads_saves_scores_and_checks_authority(service):
     assert service.inspect(lambda store: store.get(saved_id).importance_score) == 60
     assert 'Blocked' in await tool(service, 'instinct_update_score', {'segment_id': saved_id, 'new_score': 93})
     assert 'BLOCKED' in await tool(service, 'instinct_update_score', {'segment_id': 'mandatory', 'new_score': 60})
-    assert 'disabled' in await tool(service, 'instinct_delete_memory', {'segment_id': saved_id})
+    recycled = await tool(service, 'instinct_delete_memory', {'segment_id': saved_id})
+    assert 'recoverable recycle bin' in recycled
+    assert service.inspect(lambda store: store.is_recycled(saved_id))
+    assert 'BLOCKED' in await tool(service, 'instinct_delete_memory', {'segment_id': 'mandatory'})
+    assert not service.inspect(lambda store: store.is_recycled('mandatory'))
+    assert service.inspect(lambda store: store.restore(saved_id)) is not None
+    assert not service.inspect(lambda store: store.is_recycled(saved_id))
     assert 'Found' in await tool(service, 'instinct_search', {'query': 'synthetic', 'min_similarity': 0})
 
 
@@ -212,6 +243,14 @@ def test_closed_service_and_invalid_port_fail_without_default_fallback(service):
     service.close()
     with pytest.raises(RuntimeError, match='closed'):
         service.inspect(lambda store: store.count())
+
+
+def test_dashboard_is_opt_in_and_server_rejects_non_loopback_bind(service):
+    assert service._http is None
+    with pytest.raises(ValueError, match='127.0.0.1 only'):
+        SQLiteDashboardServer(('0.0.0.0', 0), SQLiteDashboardHandler)
+    service.start_dashboard(0)
+    assert service._http.server_address[0] == '127.0.0.1'
 
 
 def test_http_dashboard_reads_html_and_readiness_without_chroma(service):
@@ -321,13 +360,39 @@ async def test_observer_never_queues_writes_or_changes_sidecars(tmp_path):
                        read_only=True, **bindings()) as observer:
         assert 'read-only' in await tool(observer, 'instinct_save_memory', {'content': 'fixture', 'title': 'Observer fixture'})
         assert 'read-only' in await tool(observer, 'instinct_update_score', {'segment_id': 'ordinary', 'new_score': 70})
-        assert 'Mandatory renewal pending' in await tool(observer, 'instinct_get_mandatory', {})
+        assert 'Mandatory renewal is pending' in await tool(observer, 'instinct_get_mandatory', {})
         assert request(observer, '/api/heartbeat', method='POST')[0] == 409
         assert request(observer, '/api/decay/config', method='POST', body={'session_idle_minutes': 12})[0] == 409
         assert request(observer, '/api/list')[0] == 200
         assert request(observer, '/api/decay/config')[0] == 200
     after = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_observer_queues_recycle_and_owner_replay_keeps_it_recoverable(service, tmp_path):
+    with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
+                       read_only=True, queue_writes=True, **bindings()) as observer:
+        result = await tool(observer, 'instinct_delete_memory', {'segment_id': 'ordinary'})
+        assert 'Queued to SQLite FALLBACK' in result
+        assert 'BLOCKED' in await tool(observer, 'instinct_delete_memory', {'segment_id': 'mandatory'})
+        pending = fallback_store.list_pending(str(tmp_path))
+        assert len(pending) == 1 and pending[0]['operation'] == 'delete_memory'
+        assert not service.inspect(lambda store: store.is_recycled('ordinary'))
+
+    from instinct.sqlite_pending import replay
+    replayed = service.inspect(replay)
+    assert replayed['synced'] == 1 and not replayed['pending']
+    assert service.inspect(lambda store: store.is_recycled('ordinary'))
+    record = service.inspect(lambda store: store.get('ordinary'))
+    assert record is not None and record.concept_title == 'Synthetic ordinary memory'
+    assert record.segment.metadata['recycled_by'] == 'agent'
+    receipts = record.segment.metadata['sqlite_pending_receipts']
+    assert len(receipts) == 1 and len(receipts[0]) == 64
+    assert service.inspect(lambda store: store.restore('ordinary')) is not None
+    assert not service.inspect(lambda store: store.is_recycled('ordinary'))
+    assert service.inspect(lambda store: store.get('ordinary')).segment.metadata['sqlite_pending_receipts'] == receipts
+    assert fallback_store.list_pending(str(tmp_path)) == []
 
 
 def run_synthetic_stdio(root):
@@ -347,7 +412,7 @@ async def test_real_stdio_mcp_transport_initializes_lists_and_saves(tmp_path):
             initialized = await connection.initialize()
             assert initialized.serverInfo.name == 'vecretary-sqlite-experimental'
             tools = await connection.list_tools()
-            assert 'instinct_delete_memory' not in {item.name for item in tools.tools}
+            assert 'instinct_delete_memory' in {item.name for item in tools.tools}
             result = await connection.call_tool('instinct_get_context', {'query': 'vector recall', 'new_session': True})
             assert not result.isError
             assert 'Found' in result.content[0].text

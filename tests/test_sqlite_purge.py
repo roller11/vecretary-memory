@@ -147,11 +147,11 @@ def test_owner_can_explicitly_purge_recycled_mandatory_record(root):
         assert service.inspect(lambda store: store.get('ordinary')) is not None
 
 
-def test_agent_delete_and_bulk_reset_remain_disabled(root):
+def test_agent_recycle_and_bulk_reset_remain_safe(root):
     with owner(root, enable_purge=True) as service:
-        service.inspect(lambda store: store.recycle('ordinary'))
         response = asyncio.run(service.call('instinct_delete_memory', {'segment_id': 'ordinary'}))
-        assert 'disabled' in response[0].text
+        assert 'recoverable recycle bin' in response[0].text
+        assert service.inspect(lambda store: store.is_recycled('ordinary'))
         assert request(service, '/api/admin/reset', body={'confirm': True})[0] == 501
         assert request(service, '/api/delete', body={'id': 'ordinary'})[0] == 501
         assert service.inspect(lambda store: store.count()) == 2

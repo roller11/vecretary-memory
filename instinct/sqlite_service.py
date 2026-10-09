@@ -36,8 +36,8 @@ POST_ROUTES = frozenset({
 class SQLiteService:
     """Serialize complete service requests on one connection-owning thread.
 
-    Only existing isolated databases are accepted. Agent deletion, legacy replay,
-    backup/reset and writer-handoff operations remain fail-closed.
+    Only existing isolated databases are accepted. Agent permanent deletion,
+    legacy replay, backup/reset and writer-handoff operations remain fail-closed.
     """
 
     runtime_ready = False
@@ -114,7 +114,7 @@ class SQLiteService:
 
         def dispatch(store):
             pending = self._replay_store(store)
-            if pending and name in ('instinct_save_memory', 'instinct_update_score'):
+            if pending and name in ('instinct_save_memory', 'instinct_update_score', 'instinct_delete_memory'):
                 from mcp import types
                 return [types.TextContent(type='text', text='Error: SQLite pending writes have not drained; no new database write performed. Check provider, queue and replay status before retrying.')]
             token = mcp_server._backend_lifecycle.set(connection)
@@ -155,8 +155,7 @@ class SQLiteService:
 
         @server.list_tools()
         async def tools():
-            return [tool for tool in await mcp_server.list_tools()
-                    if tool.name != 'instinct_delete_memory']
+            return await mcp_server.list_tools()
 
         @server.call_tool()
         async def dispatch(name, arguments):
@@ -188,6 +187,11 @@ class SQLiteService:
 
 
 class SQLiteDashboardServer(dashboard.DashboardHTTPServer):
+    def __init__(self, server_address, handler_class):
+        if not isinstance(server_address, tuple) or len(server_address) < 2 or server_address[0] != '127.0.0.1':
+            raise ValueError('SQLite dashboard must bind to 127.0.0.1 only')
+        super().__init__(server_address, handler_class)
+
     def shutdown_request(self, request):
         try:
             request.shutdown(socket.SHUT_WR)
@@ -216,7 +220,7 @@ class SQLiteDashboardHandler(dashboard.Handler):
         purge_policy = ('Single recycled-record purge enabled with explicit ID confirmation. '
                         if self.server.service._purge_enabled else 'Hard deletion and purge disabled. ')
         notice = '<p role="status">Experimental SQLite integration: reset, backup and writer handoff are disabled. ' + purge_policy + policy + '</p>'
-        disabled = '<style>#edit-store-btn,#back-mcp-btn,#auto-acquire-btn{display:none}</style>'
+        disabled = '<style>#rb-empty-bin{display:none!important}</style>'
         return super()._send_html(body.replace('</header>', '</header>' + notice, 1).replace('</head>', disabled + '</head>', 1), code)
 
     def _unsupported(self):
@@ -241,6 +245,17 @@ class SQLiteDashboardHandler(dashboard.Handler):
             return self._send_json({'backend': 'sqlite', 'read_only': store._read_only,
                                    'mode': 'read_only' if store._read_only else 'write',
                                    'pid': os.getpid(), 'handoff_supported': False, 'runtime_ready': False})
+        if path == '/api/ready':
+            from .service_binding import bound_store
+            store = bound_store()
+            bound = store.query_embedder is not None and store.document_embedder is not None
+            return self._send_json({
+                'ok': True, 'ready': True, 'backend': 'sqlite', 'runtime_ready': False,
+                'read_only': store._read_only,
+                'checks': {'backend': 'sqlite', 'runtime_ready': False,
+                           'embedding_bindings': bound},
+                'degraded_reasons': [] if bound else ['Embedding bindings missing; text operations unavailable'],
+            })
         if path == '/api/health':
             from .service_binding import bound_store
             store = bound_store()

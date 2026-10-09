@@ -11,12 +11,6 @@ import sys
 import tempfile
 
 
-CHROMA_CANDIDATE_BASES = {
-    '1.5.9+instinct.security1': '1.5.9',
-    '1.5.9+instinct.security2': '1.5.9',
-}
-
-
 def requirements(packages):
     selected = []
     for package in packages:
@@ -27,8 +21,6 @@ def requirements(packages):
             r'[A-Za-z0-9][A-Za-z0-9.+!_-]*', version,
         ):
             raise ValueError('Invalid installed dependency metadata')
-        if re.sub(r'[-_.]+', '-', name).lower() == 'chromadb':
-            version = CHROMA_CANDIDATE_BASES.get(version, version)
         selected.append(f'{name}=={version}')
     if not selected:
         raise ValueError('No external dependencies selected')
@@ -84,14 +76,6 @@ def audit(audit_python, destination):
         'checked_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         'status': ('PASS', 'VULNERABLE', 'INCOMPLETE')[status],
         'local_product_not_in_advisory_index': 'vecretary-memory (legacy instinct-context); separate source review required',
-        'local_build_base_advisories': [
-            {'name': package['name'], 'installed_version': package['version'],
-             'advisory_version': CHROMA_CANDIDATE_BASES[package['version']],
-             'requires_separate_source_review': True}
-            for package in packages
-            if re.sub(r'[-_.]+', '-', package['name']).lower() == 'chromadb'
-            and package['version'] in CHROMA_CANDIDATE_BASES
-        ],
         'requirements': text.splitlines(),
         'unique_findings': sorted(findings),
         'scanner': report,

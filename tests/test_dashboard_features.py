@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
 import json
 import threading
@@ -10,35 +10,98 @@ from types import SimpleNamespace
 import pytest
 
 from instinct import dashboard, dormancy
-from instinct.models import ScoredSegment, Segment, SegmentType
+from instinct.models import RECYCLED_AT_KEY, ScoredSegment, Segment, SegmentType
 from instinct.private_storage import ensure_private_directory
 from tests.test_dashboard_security import request
-from tests.test_identifier_recycling import SyntheticCollection, make_store
+class FeatureStore:
+    def __init__(self, persist_dir):
+        self.persist_dir = str(persist_dir)
+        self._read_only = False
+        self.memories = {}
 
+    def add(self, segment):
+        if self._read_only:
+            raise RuntimeError('Store is read-only')
+        self.memories[segment.id] = deepcopy(segment)
+        return segment.id
 
-class FeatureCollection(SyntheticCollection):
-    def get(self, ids=None, limit=None, offset=0, include=None, where=None):
-        if where is not None:
-            minimum = where['$and'][0]['importance_score']['$gte']
-            maximum = where['$and'][1]['importance_score']['$lte']
-            ids = [segment_id for segment_id, record in self.records.items()
-                   if minimum <= record['metadata']['importance_score'] <= maximum]
-        return super().get(ids=ids, limit=limit, offset=offset, include=include)
+    def add_batch(self, segments):
+        return [self.add(segment) for segment in segments]
 
-    def delete(self, ids):
-        for segment_id in ids:
-            self.records.pop(segment_id, None)
+    def get(self, segment_id):
+        segment = self.memories.get(segment_id)
+        return deepcopy(segment) if segment is not None else None
 
-    def update(self, ids, metadatas):
-        for segment_id, metadata in zip(ids, metadatas):
-            self.records[segment_id]['metadata'].update(metadata)
+    def get_many(self, segment_ids):
+        return [self.get(segment_id) for segment_id in segment_ids]
+
+    def get_by_score(self, min_score=0, max_score=100, limit=100, include_recycled=False):
+        selected = [segment for segment in self.memories.values()
+                    if min_score <= segment.importance_score <= max_score
+                    and (include_recycled or not segment.segment.metadata.get(RECYCLED_AT_KEY))]
+        return [deepcopy(segment) for segment in sorted(
+            selected, key=lambda item: item.importance_score, reverse=True)[:limit]]
+
+    def get_mandatory(self, include_recycled=False):
+        return self.get_by_score(100, 100, limit=len(self.memories), include_recycled=include_recycled)
+
+    def list_recycled(self, limit=200):
+        return [deepcopy(segment) for segment in self.memories.values()
+                if segment.segment.metadata.get(RECYCLED_AT_KEY)][:limit]
+
+    def count(self):
+        return len(self.memories)
+
+    def recycle(self, segment_id, by='dashboard', reason=''):
+        segment = self.memories.get(segment_id)
+        if segment is None or self._read_only:
+            return None
+        segment = deepcopy(segment)
+        segment.segment.metadata[RECYCLED_AT_KEY] = datetime.now().isoformat()
+        self.memories[segment_id] = segment
+        return deepcopy(segment)
+
+    def restore(self, segment_id):
+        segment = self.memories.get(segment_id)
+        if segment is None or self._read_only:
+            return None
+        segment = deepcopy(segment)
+        segment.segment.metadata.pop(RECYCLED_AT_KEY, None)
+        self.memories[segment_id] = segment
+        return deepcopy(segment)
+
+    def delete(self, segment_id):
+        if self._read_only:
+            return False
+        return self.memories.pop(segment_id, None) is not None
+
+    def update_metadata_only(self, segment):
+        if self._read_only or segment.id not in self.memories:
+            return False
+        self.memories[segment.id] = deepcopy(segment)
+        return True
+
+    def update_score(self, segment_id, score, reasoning=''):
+        segment = self.get(segment_id)
+        if segment is None or self._read_only:
+            return False
+        segment.importance_score = score
+        segment.reasoning = reasoning
+        return self.update_metadata_only(segment)
+
+    def search(self, query, limit=10, min_importance=None, include_recycled=False, **_):
+        terms = set(query.lower().split())
+        found = [segment for segment in self.get_by_score(
+            min_score=0 if min_importance is None else min_importance,
+            limit=len(self.memories), include_recycled=include_recycled)
+            if terms & set((segment.concept_title + ' ' + segment.segment.content).lower().split())]
+        return found[:limit]
 
 
 @pytest.fixture
 def feature_dashboard(tmp_path, monkeypatch):
     root = ensure_private_directory(tmp_path / 'synthetic-dashboard')
-    store = make_store(FeatureCollection(root))
-    store.persist_dir = str(root)
+    store = FeatureStore(root)
     monkeypatch.setattr(dormancy, '_store', dormancy._ConfigStore(root))
     monkeypatch.setattr(dashboard, 'PERSIST_DIR', str(root))
     monkeypatch.setattr(dashboard, 'get_store', lambda: store)
@@ -63,78 +126,56 @@ def post(server, route, payload):
     return status, json.loads(body)
 
 
+def test_dashboard_header_and_logo_use_packaged_same_origin_asset(feature_dashboard):
+    server, _, _ = feature_dashboard
+    status, body, headers = request(server, method='GET', route='/')
+    assert status == 200
+    assert b'<img class="brand-mark" src="/assets/vecretary-logo.png" alt="">' in body
+    assert b"prefers-reduced-motion: reduce" in body
+    assert b"--surface-2" in body
+    assert "img-src 'self' data:" in headers['Content-Security-Policy']
+
+    status, image, headers = request(server, method='GET', route='/assets/vecretary-logo.png')
+    assert status == 200
+    assert headers['Content-Type'] == 'image/png'
+    assert headers['X-Content-Type-Options'] == 'nosniff'
+    assert image == dashboard.resources.files('instinct').joinpath(
+        'assets', 'vecretary-logo-512.png').read_bytes()
+
+
 def payload(**updates):
     return {'title': 'Synthetic feature fixture', 'content': 'Synthetic orchard test memory.',
             'score': 70, 'segment_type': 'context', 'decay_profile': 'standard', **updates}
 
 
-def test_observer_cannot_initialize_writer_during_dashboard_release(monkeypatch):
-    entered = threading.Event()
-    finish = threading.Event()
-    observing = threading.Event()
-    observed = threading.Event()
-    modes = []
+def test_dashboard_refuses_storage_without_sqlite_service_binding():
+    from instinct.service_binding import bind_store
 
-    def construct(**kwargs):
-        modes.append(kwargs['read_only'])
-        if kwargs['read_only']:
-            entered.set()
-            assert finish.wait(timeout=5)
-        return SimpleNamespace(_read_only=kwargs['read_only'], _writer_lock_handle=None)
+    with pytest.raises(RuntimeError, match='only inside the SQLite service'):
+        dashboard.get_store()
 
-    def observe():
-        observing.set()
-        store = dashboard.get_store()
-        observed.set()
-        return store
-
-    monkeypatch.setattr(dashboard, '_store', SimpleNamespace(_writer_lock_handle=None))
-    monkeypatch.setattr(dashboard, '_retriever', None)
-    monkeypatch.setattr(dashboard, 'InstinctStore', construct)
-    monkeypatch.setattr(dashboard, 'PERSIST_DIR', 'synthetic-transition-fixture')
-    monkeypatch.setattr('instinct.configure_dormancy', lambda directory: None)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        release = pool.submit(dashboard.release_write_mode)
-        try:
-            assert entered.wait(timeout=5)
-            observer = pool.submit(observe)
-            assert observing.wait(timeout=5)
-            assert not observed.wait(timeout=0.05)
-        finally:
-            finish.set()
-        assert release.result(timeout=5)['released']
-        assert observer.result(timeout=5)._read_only
-    assert modes == [True]
+    with bind_store(SimpleNamespace(persist_dir='synthetic-runtime', _read_only=True)) as store:
+        assert dashboard.get_store() is store
 
 
 @pytest.mark.parametrize('include_recycle', [False, True])
-def test_reset_real_store_contract_and_recycle_snapshot(feature_dashboard, include_recycle):
+def test_reset_is_disabled_without_mutating_store(feature_dashboard, include_recycle):
     server, store, root = feature_dashboard
-    active = ScoredSegment(Segment('Synthetic active reset fixture', SegmentType.CONTEXT), 70, 'Active reset')
-    recycled = ScoredSegment(Segment('Synthetic recycled reset fixture', SegmentType.CONTEXT), 60, 'Recycled reset')
+    active = ScoredSegment(Segment('Synthetic reset refusal fixture', SegmentType.CONTEXT), 70, 'Reset refusal')
     store.add(active)
-    store.add(recycled)
-    store.recycle(recycled.id)
-    status, preview = post(server, '/api/admin/reset', {'dry_run': True, 'include_recycle': include_recycle})
-    assert status == 200 and preview['active_segment_count'] == 1
-    assert store.count() == 2 and not (root / 'backups').exists()
+    before = store.count()
     status, result = post(server, '/api/admin/reset', {'include_recycle': include_recycle})
-    assert status == 200 and result['ok']
-    assert result['wiped_active'] == 1 and result['wiped_recycle'] == int(include_recycle)
-    assert store.get(active.id) is None
-    assert (store.get(recycled.id) is None) == include_recycle
-    snapshot = json.loads(Path(result['backup_recycle']).read_text())
-    assert snapshot[0]['id'] == recycled.id
-    assert snapshot[0]['metadata']['content'] == recycled.segment.content
+    assert status == 501 and result['code'] == 501
+    assert store.count() == before and store.get(active.id) is not None
+    assert not (root / 'backups').exists()
 
 
-def test_reset_reports_failed_deletion_instead_of_success(feature_dashboard, monkeypatch):
+def test_reset_refusal_does_not_delete_memory(feature_dashboard):
     server, store, _ = feature_dashboard
     active = ScoredSegment(Segment('Synthetic failed reset fixture', SegmentType.CONTEXT), 70, 'Failed reset')
     store.add(active)
-    monkeypatch.setattr(store, 'delete', lambda segment_id: False)
     status, result = post(server, '/api/admin/reset', {})
-    assert status == 500 and 'not confirmed' in result['error']
+    assert status == 501 and 'not available' in result['error']
     assert store.get(active.id) is not None
 
 

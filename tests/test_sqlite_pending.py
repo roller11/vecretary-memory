@@ -180,7 +180,8 @@ def test_legacy_and_deletion_queues_retained_without_replay(root):
     with owner(root, replay_pending=True, **bindings()) as service:
         assert service.last_replay['synced'] == 1 and service.last_replay['skipped'] == 1
         assert service.inspect(lambda adapter: adapter.get('ordinary')) is not None
-        assert 'disabled' in call(service, 'instinct_delete_memory', {'segment_id': 'ordinary'})
+        assert 'recoverable recycle bin' in call(service, 'instinct_delete_memory', {'segment_id': 'ordinary'})
+        assert service.inspect(lambda adapter: adapter.is_recycled('ordinary'))
     assert Path(original).exists()
 
 
@@ -412,7 +413,7 @@ async def test_actual_observer_cli_capture_and_owner_stdio_replay(root):
         async with ClientSession(reader, writer) as client:
             await client.initialize()
             tools = await client.list_tools()
-            assert 'instinct_delete_memory' not in {tool.name for tool in tools.tools}
+            assert 'instinct_delete_memory' in {tool.name for tool in tools.tools}
             result = await client.call_tool('instinct_get', {'segment_id': queued_id(record)})
             assert not result.isError and 'Transport queued' in result.content[0].text
     assert not Path(record['_path']).exists()

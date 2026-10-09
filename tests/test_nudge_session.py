@@ -183,27 +183,3 @@ def test_session_marker_survives_restart_without_repeating_restore(store):
     tick_nudge_session(store, now=started + timedelta(seconds=1))
     assert store.memories[0].importance_score == 79
     store.update_metadata_only.assert_not_called()
-
-
-def test_metadata_restore_uses_real_store_serialization_without_embeddings(tmp_path):
-    from instinct.store import InstinctStore
-
-    memory = make_memory(**{TURNS_SINCE_ACCESS_KEY: 7})
-    recycled = make_memory(content="Retired rule", **{RECYCLED_AT_KEY: "2026-10-01"})
-    real_store = object.__new__(InstinctStore)
-    real_store.persist_dir = str(tmp_path)
-    real_store._read_only = False
-    real_store._collection = Mock()
-    real_store._collection.count.return_value = 2
-    real_store._collection.get.return_value = {
-        "ids": [memory.id, recycled.id],
-        "documents": [memory.segment.content, recycled.segment.content],
-        "metadatas": [memory.to_storage_dict(), recycled.to_storage_dict()],
-    }
-    tick_nudge_session(real_store)
-    real_store._collection.update.assert_called_once()
-    update = real_store._collection.update.call_args.kwargs
-    assert set(update) == {"ids", "metadatas"}
-    assert update["ids"] == [memory.id]
-    assert update["metadatas"][0]["importance_score"] == 100
-    assert update["metadatas"][0][TURNS_SINCE_ACCESS_KEY] == 0

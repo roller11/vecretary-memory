@@ -111,6 +111,35 @@ def test_pop_and_metadata_writes_preserve_vectors_unknown_fields_and_clock(runti
     assert session_timer.state(adapter.persist_dir) == clock
 
 
+def test_namespaced_score_extensions_survive_score_updates_and_reopen(runtime):
+    adapter, _ = runtime
+    adapter.add(memory())
+    patch = {
+        'confidence': 0.875,
+        'signals': ['semantic', 'recency'],
+        'parameters': {'half_life_hours': 48, 'enabled': True},
+    }
+
+    updated = adapter.patch_score_extension('note', 'org.rawwire.relevance', patch)
+    assert updated.segment.metadata['score_extensions']['org.rawwire.relevance'] == patch
+    assert adapter.update_score('note', 76, 'Synthetic module adjustment')
+    persisted = adapter.repository.get_record('note').to_dict()['metadata']
+    assert persisted['importance_score'] == 76
+    assert persisted['score_extensions']['org.rawwire.relevance'] == patch
+    with SQLiteRecordStore.open_read_only(adapter.persist_dir / 'sqlite', adapter.repository.identity) as reader:
+        reopened = SQLiteSegmentAdapter(reader, persist_dir=adapter.persist_dir).get('note')
+        assert reopened.segment.metadata['score_extensions']['org.rawwire.relevance'] == patch
+
+
+def test_score_extension_rejects_invalid_namespace_and_non_object(runtime):
+    adapter, _ = runtime
+    adapter.add(memory())
+    with pytest.raises(ValueError, match='namespace'):
+        adapter.patch_score_extension('note', '../untrusted', {'value': 1})
+    with pytest.raises(ValueError, match='object'):
+        adapter.patch_score_extension('note', 'org.rawwire.relevance', ['not', 'an', 'object'])
+
+
 def test_changed_text_is_reembedded_with_preserved_unknown_metadata(runtime):
     adapter, provider = runtime
     adapter.add(memory())

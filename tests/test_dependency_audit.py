@@ -16,10 +16,10 @@ def test_requirements_audits_external_packages_only_without_private_install_path
     result = audit.requirements([
         {'name': 'instinct_context', 'version': '0.1.0.dev0'},
         {'name': 'vecretary_memory', 'version': '0.1.0a1'},
-        {'name': 'chromadb', 'version': '1.5.9'},
+        {'name': 'example-vector-client', 'version': '1.5.9'},
         {'name': 'httpx', 'version': '0.28.1'},
     ])
-    assert result == 'chromadb==1.5.9\nhttpx==0.28.1\n'
+    assert result == 'example-vector-client==1.5.9\nhttpx==0.28.1\n'
 
 
 @pytest.mark.parametrize('name,version', [('bad\npackage', '1.0'), ('package', '1.0\n--option')])
@@ -48,6 +48,6 @@ def test_missing_dependency_cannot_silently_pass():
     assert audit.verdict(report, 0, {('safe', '1.0')}) == 0
 
 
-@pytest.mark.parametrize('version', ['1.5.9+instinct.security1', '1.5.9+instinct.security2'])
-def test_custom_chroma_version_does_not_escape_base_version_advisories(version):
-    assert audit.requirements([{'name': 'chromadb', 'version': version}]) == 'chromadb==1.5.9\n'
+def test_local_build_version_is_not_rewritten_for_advisory_scanning():
+    assert audit.requirements([{'name': 'example-vector-client', 'version': '1.5.9+local.1'}]) == \
+        'example-vector-client==1.5.9+local.1\n'

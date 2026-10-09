@@ -331,7 +331,7 @@ with SQLiteRuntimeSession.open(sys.argv[2], EmbeddingIdentity('synthetic', 'fixe
             open_session(runtime, read_only=False)
         child.kill()
         child.wait(timeout=20)
-        with open_session(runtime, read_only=False) as owner:
+        with open_session(runtime, read_only=False, writer_timeout=2) as owner:
             tick = owner.tick_activity()
             assert tick.current_turn == 2
             assert tick.session.seconds_added_to_accumulator == 0

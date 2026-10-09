@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Offline owner-reviewed queue disposition; never convert, replay or erase data."""
+"""Offline owner-reviewed queue disposition; preserve originals and never auto-replay."""
 
 import hashlib
 import json
@@ -11,7 +11,7 @@ from .sqlite_backup import _inventory, _publish, _read, _validated_snapshot
 from .sqlite_records import EmbeddingIdentity, canonical_json, require_text
 
 
-FORMAT = 'vecretary-sqlite-queue-review-1'
+FORMAT = 'vecretary-sqlite-queue-review-2'
 
 
 def _decode(raw):
@@ -57,12 +57,105 @@ def _review(payloads, manifest, identity):
             raise ValueError('Unsafe pending filename')
         if len(raw) > fallback_store.MAX_PENDING_BYTES:
             raise ValueError('Pending record exceeds review limit')
+        classification = _classification(raw, identity, clock)
+        legacy_operation = None
+        if classification == 'legacy_pending':
+            legacy_operation = fallback_store._validate_record(_decode(raw))['operation']
         entries.append({'file': name, 'sha256': hashlib.sha256(raw).hexdigest(),
-                        'classification': _classification(raw, identity, clock), 'action': 'retain'})
+                        'classification': classification, 'legacy_operation': legacy_operation,
+                        'action': 'retain'})
     fingerprint = hashlib.sha256(canonical_json({
         'identity': manifest['identity'], 'records': manifest['records'],
         'files': _inventory(payloads)}).encode('ascii')).hexdigest()
     return {'format': FORMAT, 'snapshot_sha256': fingerprint, 'files': entries}
+
+
+def _convert_legacy_operation(raw, source_name, action, snapshot, payloads, identity):
+    record = fallback_store._validate_record(_decode(raw))
+    action_operations = {
+        'convert_save': 'save_memory',
+        'convert_score_update': 'update_score',
+        'convert_soft_recycle': 'delete_memory',
+    }
+    expected_operation = action_operations.get(action)
+    if (record['schema_version'] not in (1, 2) or expected_operation is None or
+            record['operation'] != expected_operation):
+        raise ValueError('Reviewed conversion action does not match the legacy operation')
+    from datetime import datetime
+    timestamp = datetime.fromisoformat(record['created_at'])
+    if timestamp.tzinfo is not None:
+        raise ValueError('Legacy timestamp must be timezone-naive for SQLite replay')
+    clock_raw = payloads.get('session_state.json')
+    if clock_raw is None:
+        raise ValueError('A validated SQLite session clock is required for conversion')
+    clock = _decode(clock_raw)
+    clock_id = clock.get('clock_id')
+    seconds = clock.get('accumulated_session_seconds')
+    try:
+        valid_seconds = type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0
+    except OverflowError:
+        valid_seconds = False
+    if (not isinstance(clock_id, str) or not 1 <= len(clock_id) <= 256 or not valid_seconds):
+        raise ValueError('Snapshot session clock cannot bind the legacy operation')
+
+    payload = record['payload']
+    if record['operation'] == 'save_memory':
+        from .mcp_server import _check_write_guards
+        from .write_policy import agent_write_error
+        error = agent_write_error(payload.get('importance_score'), payload.get('segment_type'))
+        error = error or _check_write_guards(
+            payload['content'], payload['title'], payload['importance_score'], track_rate=False)
+        if error:
+            raise ValueError(error)
+        operation_payload = {key: payload[key] for key in (
+            'content', 'title', 'importance_score', 'segment_type', 'reasoning') if key in payload}
+    else:
+        from .models import ScoredSegment
+        from .sqlite_store import SQLiteRecordStore
+        from .write_policy import agent_target_error, agent_write_error
+        if record['operation'] == 'update_score':
+            target_id = require_text(payload.get('segment_id', ''), 'record ID', 256)
+            error = agent_write_error(payload.get('new_score'))
+            operation_payload = {key: payload[key] for key in (
+                'segment_id', 'new_score', 'score_reason') if key in payload}
+        else:
+            target_id = require_text(payload.get('delete_id', ''), 'record ID', 256)
+            error = None
+            operation_payload = {'delete_id': target_id}
+        if error:
+            raise ValueError(error)
+        with SQLiteRecordStore.open_read_only(Path(snapshot) / 'sqlite', identity) as repository:
+            target = repository.get_record(target_id)
+        if target is None:
+            raise ValueError('Legacy operation target is absent from the SQLite snapshot')
+        target_payload = target.to_dict()
+        target_metadata = target_payload['metadata'] | {'id': target.record_id, 'content': target.content}
+        try:
+            segment = ScoredSegment.from_storage_dict(target_metadata, embedding=target_payload['embedding'])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError('Legacy operation target metadata requires owner review') from error
+        authority_error = agent_target_error(segment)
+        if authority_error:
+            raise ValueError(authority_error)
+        if record['operation'] == 'delete_memory' and target_metadata.get('recycled_at'):
+            raise ValueError('Legacy recycle target is already in the recycle bin')
+
+    converted = {
+        'schema_version': 3,
+        'authority': 'agent',
+        'operation': record['operation'],
+        'created_at': record['created_at'],
+        'sync_state': 'pending',
+        'synced_instinct_id': None,
+        'payload': operation_payload,
+        'sqlite_identity': identity.to_dict(),
+        'active_clock': {'clock_id': clock_id, 'seconds': seconds},
+        'sqlite_database': 'sqlite',
+    }
+    fallback_store._validate_record(converted)
+    operation_digest = hashlib.sha256(source_name.encode('utf-8') + b'\x00' + raw).hexdigest()
+    filename = 'converted-' + record['operation'] + '-' + operation_digest + '.json'
+    return 'fallback_pending/' + filename, (canonical_json(converted) + '\n').encode('ascii')
 
 
 def inventory_snapshot(snapshot, identity):
@@ -89,20 +182,44 @@ def prepare_reviewed_restore(snapshot, destination, identity, review, *, apply=F
     actions = {}
     for selected, current in zip(review['files'], expected['files']):
         if (not isinstance(selected, dict) or set(selected) != set(current) or
-                any(selected[key] != current[key] for key in ('file', 'sha256', 'classification')) or
-                selected['action'] not in ('retain', 'archive')):
+                any(selected[key] != current[key] for key in
+                    ('file', 'sha256', 'classification', 'legacy_operation')) or
+                selected['action'] not in ('retain', 'archive', 'convert_save',
+                                           'convert_score_update', 'convert_soft_recycle') or
+                selected['action'].startswith('convert_') and
+                current['classification'] != 'legacy_pending'):
             raise ValueError('Every queued file requires an exact digest-bound disposition')
         actions[current['file']] = selected['action']
-    archived = sum(action == 'archive' for action in actions.values())
+    converted = {}
+    for name, action in actions.items():
+        if action.startswith('convert_'):
+            converted_name, converted_raw = _convert_legacy_operation(
+                payloads[name], name, action, snapshot, payloads, identity)
+            if converted_name in payloads or converted_name in converted:
+                raise ValueError('Converted queue filename conflicts with snapshot state')
+            converted[converted_name] = converted_raw
+    retained_queue = [name for name, action in actions.items() if action == 'retain']
+    retained_bytes = sum(len(payloads[name]) for name in retained_queue)
+    if (len(retained_queue) + len(converted) > fallback_store.MAX_PENDING_RECORDS or
+            retained_bytes + sum(map(len, converted.values())) > fallback_store.MAX_PENDING_TOTAL_BYTES):
+        raise ValueError('Converted pending queue exceeds runtime queue limits')
+    archived = sum(action == 'archive' or action.startswith('convert_') for action in actions.values())
+    converted_count = sum(action.startswith('convert_') for action in actions.values())
+    retained = sum(action == 'retain' for action in actions.values())
     blocked = sum(entry['classification'] != 'sqlite_pending' and actions[entry['file']] == 'retain'
                   for entry in expected['files'])
     report = {'format': FORMAT, 'applied': apply, 'runtime_ready': False,
-              'archived_files': archived, 'retained_files': len(actions) - archived,
+              'archived_files': archived, 'converted_files': converted_count,
+              'retained_files': retained,
               'retained_blocked_files': blocked, 'review': review}
     if not apply:
         return report
-    copied = {('archive/' if actions.get(name) == 'archive' else 'runtime/') + name: raw
-              for name, raw in payloads.items()}
+    copied = {}
+    for name, raw in payloads.items():
+        action = actions.get(name, 'retain') if name.startswith('fallback_pending/') else 'retain'
+        target_root = 'archive/' if action == 'archive' or action.startswith('convert_') else 'runtime/'
+        copied[target_root + name] = raw
+    copied.update({'runtime/' + name: raw for name, raw in converted.items()})
     copied['QUEUE_REVIEW.json'] = canonical_json(report).encode('ascii')
     _publish(destination, copied)
     return report

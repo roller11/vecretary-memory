@@ -208,10 +208,10 @@ def test_symlink_manifest_is_refused(tmp_path, identity, record):
         read_manifest(link, identity)
 
 
-def test_runtime_default_remains_chroma():
-    from instinct.store import InstinctStore
-    assert InstinctStore.__module__ == 'instinct.store'
-    assert SQLiteRecordStore is not InstinctStore
+def test_runtime_api_is_sqlite_specific():
+    import instinct
+    assert not hasattr(instinct, 'InstinctStore')
+    assert SQLiteRecordStore.__module__ == 'instinct.sqlite_store'
 
 
 @pytest.mark.parametrize('score,profile', [(84, 'standard'), (90, 'standard'),

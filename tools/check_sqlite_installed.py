@@ -25,7 +25,7 @@ async def check_stdio(root):
             names = {tool.name for tool in (await connection.list_tools()).tools}
             assert names == {'instinct_get_context', 'instinct_get_mandatory',
                              'instinct_search', 'instinct_save_memory', 'instinct_get',
-                             'instinct_update_score'}
+                             'instinct_update_score', 'instinct_delete_memory'}
             result = await connection.call_tool('instinct_get_mandatory', {})
             assert not result.isError
             assert 'Error:' not in result.content[0].text
@@ -50,7 +50,7 @@ def main():
 
     assert Path(instinct.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     product = distribution('vecretary-memory')
-    assert product.version == '0.2.0a1'
+    assert product.version == '0.2.0a2'
     assert product.metadata['License-Expression'] == 'MPL-2.0'
     license_files = [file for file in product.files or ()
                      if str(file).endswith('.dist-info/licenses/LICENSE')]

@@ -8,22 +8,19 @@ order and falls back gracefully.
 
 Design goals:
   - Full-featured local: Ollama with nomic-embed-text (GPU, strong model)
-  - Lightweight cPanel: ChromaDB default ONNX (no GPU, no torch, no Ollama)
-  - Remote API: any HTTP embedding endpoint (future)
-  - Self-contained: works anywhere with just chromadb installed
+  - Optional local sentence-transformers provider for explicitly configured adapters
+  - No persisted provider selection or backend-specific embedding reconstruction
 
 Provider priority (default):
   1. ollama  — local GPU server, strongest model, lightweight process
-  2. onnx    — ChromaDB built-in ONNX embedder (all-MiniLM-L6-v2), no torch
-  3. sentence_transformers — heavy, needs torch + transformers
-  4. default — explicit local ONNX compatibility alias
+  2. sentence_transformers — optional local model, needs torch + transformers
 
 Each provider is a class with:
   - name() -> str
   - is_available() -> bool  (cheap probe, no side effects)
-  - __call__(input: List[str]) -> List[List[float]]  (ChromaDB interface)
+  - __call__(input: List[str]) -> List[List[float]]
   - embed_query(text) -> List[float]  (single-query convenience)
-  - embed_documents(texts) -> List[List[float]]  (ChromaDB compat)
+  - embed_documents(texts) -> List[List[float]]
 
 The factory get_embedding_provider(config) returns the first available
 provider, or raises if none are available. Never delegate provider selection
@@ -46,19 +43,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     # Provider selection: ordered list of provider names to try.
-    # Set via env CE_EMBEDDING_PROVIDERS="ollama,onnx" or override in code.
-    "providers": ["ollama", "onnx", "sentence_transformers", "default"],
+    # Set via env CE_EMBEDDING_PROVIDERS or override in code.
+    "providers": ["ollama", "sentence_transformers"],
 
     # Ollama settings
     "ollama": {
         "model_name": os.environ.get("CE_OLLAMA__EMBED_MODEL", "nomic-embed-text:latest"),
         "base_url": os.environ.get("CE_OLLAMA__HOST", "http://localhost:11434"),
         "timeout": float(os.environ.get("CE_OLLAMA__EMBED_TIMEOUT", "30.0")),
-    },
-
-    # ONNX settings (ChromaDB built-in)
-    "onnx": {
-        "model_name": os.environ.get("CE_ONNX__EMBED_MODEL", "all-MiniLM-L6-v2"),
     },
 
     # Sentence-transformers settings (heavy, needs torch)
@@ -113,9 +105,7 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
 # =============================================================================
 
 class EmbeddingProvider:
-    """Base class for embedding providers. Subclasses implement the
-    ChromaDB embedding function interface (__call__, embed_query,
-    embed_documents) plus is_available() for the factory."""
+    """Base interface for explicitly configured embedding providers."""
 
     @staticmethod
     def name() -> str:
@@ -145,13 +135,13 @@ class EmbeddingProvider:
         raise NotImplementedError
 
     def embed_query(self, input: str | List[str]) -> List[List[float]]:
-        """ChromaDB-compatible query embedding entry point."""
+        """Return embeddings for one or more query strings."""
         if isinstance(input, str):
             input = [input]
         return self(input)
 
     def embed_documents(self, input: List[str]) -> List[List[float]]:
-        """ChromaDB-compatible document embedding entry point."""
+        """Return embeddings for one or more documents."""
         return self(input)
 
 
@@ -279,7 +269,7 @@ class OllamaProvider(EmbeddingProvider):
 
     def __call__(self, input: List[str]) -> List[List[float]]:
         """Generate embeddings. RAISES on failure — never returns empty
-        vectors (which corrupt the ChromaDB collection).
+        vectors (which violate the SQLite embedding identity).
 
         Uses the modern /api/embed endpoint with truncate=True so long
         documents are truncated SERVER-SIDE instead of failing with
@@ -344,77 +334,12 @@ class OllamaProvider(EmbeddingProvider):
 
 
 # =============================================================================
-# PROVIDER: ONNX (ChromaDB built-in, no torch, lightweight)
-# =============================================================================
-
-class OnnxProvider(EmbeddingProvider):
-    """ChromaDB's built-in ONNX embedder. Uses onnxruntime (already in
-    requirements.txt). No torch, no transformers, no GPU needed. This is
-    the cPanel-friendly provider — works on any Linux with just chromadb
-    + onnxruntime installed."""
-
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self.model_name = model_name
-        self._fn = None  # lazy init
-
-    @staticmethod
-    def name() -> str:
-        return "onnx"
-
-    def get_config(self) -> dict:
-        return {"provider": "onnx", "model_name": self.model_name}
-
-    @staticmethod
-    def build_from_config(config: dict) -> "OnnxProvider":
-        return OnnxProvider(model_name=config.get("model_name", "all-MiniLM-L6-v2"))
-
-    def is_available(self) -> bool:
-        """Check if onnxruntime is importable. Does NOT load the model
-        (that happens lazily on first __call__)."""
-        try:
-            import onnxruntime  # noqa: F401
-            return True
-        except ImportError:
-            return False
-
-    def _ensure_loaded(self) -> None:
-        """Lazily load the ONNX embedding function. ChromaDB ships this
-        as chromadb.utils.embedding_functions.ONNXMiniLM_L6_V2."""
-        if self._fn is not None:
-            return
-        try:
-            from chromadb.utils import embedding_functions
-            self._fn = embedding_functions.ONNXMiniLM_L6_V2()
-            logger.info("ONNX embedding function loaded (all-MiniLM-L6-v2)")
-        except Exception as e:
-            raise RuntimeError(
-                "Failed to load ONNX embedding function; details withheld. "
-                f"Ensure chromadb and onnxruntime are installed."
-            )
-
-    def __call__(self, input: List[str]) -> List[List[float]]:
-        self._ensure_loaded()
-        return self._fn(input)
-
-    def embed_query(self, input: str | List[str]) -> List[List[float]]:
-        self._ensure_loaded()
-        if isinstance(input, str):
-            input = [input]
-        return self._fn(input)
-
-    def embed_documents(self, input: List[str]) -> List[List[float]]:
-        self._ensure_loaded()
-        return self._fn(input)
-
-
-# =============================================================================
-# PROVIDER: SENTENCE TRANSFORMERS (heavy, needs torch)
+# PROVIDER: SENTENCE TRANSFORMERS (optional, needs torch)
 # =============================================================================
 
 class SentenceTransformerProvider(EmbeddingProvider):
     """Sentence-transformers embedder. Heavy: loads torch + transformers
-    into the process. Use only when Ollama and ONNX are unavailable and
-    you have the RAM/GPU for it."""
+    into the process. Use only when explicitly selected and adequately resourced."""
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
@@ -445,19 +370,10 @@ class SentenceTransformerProvider(EmbeddingProvider):
         if self._fn is not None:
             return
         try:
-            from chromadb.utils import embedding_functions
-            constructor_options = {}
-            validation = getattr(embedding_functions, 'validate_embedding_function_config_is_safe', None)
-            if validation is None:
-                constructor_options['trust_remote_code'] = False
-            else:
-                validation('sentence_transformer', {'kwargs': {}})
-            self._fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=self.model_name,
-                **constructor_options,
-            )
+            from sentence_transformers import SentenceTransformer
+            self._fn = SentenceTransformer(self.model_name, trust_remote_code=False)
             logger.info(f"SentenceTransformer embedding loaded ({self.model_name})")
-        except Exception as e:
+        except Exception:
             raise RuntimeError(
                 "Failed to load SentenceTransformer; details withheld. "
                 f"Install: pip install sentence-transformers torch"
@@ -465,36 +381,7 @@ class SentenceTransformerProvider(EmbeddingProvider):
 
     def __call__(self, input: List[str]) -> List[List[float]]:
         self._ensure_loaded()
-        return self._fn(input)
-
-    def embed_query(self, input: str | List[str]) -> List[List[float]]:
-        self._ensure_loaded()
-        if isinstance(input, str):
-            input = [input]
-        return self._fn(input)
-
-    def embed_documents(self, input: List[str]) -> List[List[float]]:
-        self._ensure_loaded()
-        return self._fn(input)
-
-
-# =============================================================================
-# PROVIDER: DEFAULT (ChromaDB fallback, always available)
-# =============================================================================
-
-class DefaultProvider(OnnxProvider):
-    """Compatibility alias for an explicit local ONNX embedding provider."""
-
-    @staticmethod
-    def name() -> str:
-        return "default"
-
-    def get_config(self) -> dict:
-        return {"provider": "default", "model_name": self.model_name}
-
-    @staticmethod
-    def build_from_config(config: dict) -> "DefaultProvider":
-        return DefaultProvider(model_name=config.get("model_name", "all-MiniLM-L6-v2"))
+        return self._fn.encode(input, convert_to_numpy=True).tolist()
 
 
 # =============================================================================
@@ -504,9 +391,7 @@ class DefaultProvider(OnnxProvider):
 # Registry of provider classes by name
 _PROVIDERS: Dict[str, type] = {
     "ollama": OllamaProvider,
-    "onnx": OnnxProvider,
     "sentence_transformers": SentenceTransformerProvider,
-    "default": DefaultProvider,
 }
 
 
@@ -530,7 +415,7 @@ def get_embedding_provider(
         An explicit EmbeddingProvider instance.
     """
     cfg = config or get_config()
-    provider_names = cfg.get("providers", ["ollama", "onnx", "sentence_transformers", "default"])
+    provider_names = cfg.get("providers", ["ollama", "sentence_transformers"])
 
     tried = []
     for name in provider_names:

@@ -98,7 +98,7 @@ def get_current_turn(store) -> int:
     """Read the current turn counter without ticking.
 
     Args:
-        store: An InstinctStore (or anything with a `persist_dir` attribute).
+        store: A store adapter with a `persist_dir` attribute.
 
     Returns:
         Current global turn number (0 if never ticked).

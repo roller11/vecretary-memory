@@ -127,7 +127,7 @@ def test_capability_is_launch_specific(secured_dashboard):
 
 @pytest.mark.parametrize('scenario', [
     'recovery', 'edit_denied', 'origin_denied', 'cross_origin', 'read_only',
-    'bootstrap_denied', 'invalid_capability', 'retry_denied', 'concurrent',
+    'bootstrap_denied', 'invalid_capability', 'retry_denied', 'concurrent', 'preference_toggle',
     'success', 'get_denied',
 ])
 def test_browser_capability_recovery(secured_dashboard, scenario):
@@ -257,10 +257,7 @@ def test_reset_flags_are_strict_booleans(secured_dashboard, body):
 
 
 @pytest.mark.parametrize('body', [b'{"max_wait_seconds":true}', b'{"max_wait_seconds":-1}', b'{"max_wait_seconds":61}', b'{"max_wait_seconds":"60"}'])
-def test_lock_wait_is_bounded_before_lock_operations(secured_dashboard, monkeypatch, body):
+def test_writer_handoff_is_disabled_for_sqlite(secured_dashboard, body):
     server, _, _ = secured_dashboard
-    acquire = Mock()
-    monkeypatch.setattr(dashboard, 'auto_acquire_write_mode', acquire)
     status, _, _ = request(server, route='/api/mode/auto_acquire', body=body)
-    assert status == 400
-    acquire.assert_not_called()
+    assert status == 501

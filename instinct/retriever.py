@@ -11,15 +11,12 @@ Now includes modifier pipeline for time-based decay and pop mechanics.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 
 from .models import ScoredSegment, RetrievalResult, SegmentType, PopResultRecord
 from .modifiers import ModifierPipeline, QueryContext, ScoringResult, create_default_pipeline
 from .pop import apply_pop, PopResult
 from .dormancy import DormancyConfig
-
-if TYPE_CHECKING:
-    from .store import InstinctStore
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +77,7 @@ class PriorityRetriever:
     
     def __init__(
         self,
-        store: "InstinctStore",
+        store: Any,
         config: Optional[RetrievalConfig] = None,
         pipeline: Optional[ModifierPipeline] = None,
     ):
@@ -306,8 +303,7 @@ class PriorityRetriever:
             if pop_result.rule_applied == "none":
                 continue
 
-            # Persist the mutation. store.add() is upsert semantics for
-            # Chroma (it updates metadata for the existing ID).
+            # Persist the mutation using the adapter's idempotent record update.
             # FAILSAFE: if the store is read-only or the write fails, log
             # the warning and skip persistence — the in-memory mutation
             # still affects this retrieval result, it just won't survive

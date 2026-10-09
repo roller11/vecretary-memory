@@ -236,18 +236,14 @@ def test_oversized_existing_record_is_not_read_or_replayed(queue_store, monkeypa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('operation', ['update_score', 'delete_memory'])
 @pytest.mark.parametrize('score', [100, 79])
-async def test_direct_agent_tools_preserve_owner_records(queue_store, operation, score):
+async def test_direct_agent_score_updates_preserve_owner_records(queue_store, score):
     from instinct import mcp_server
-    root, store = queue_store
+    _, store = queue_store
     memory = ScoredSegment(Segment('Synthetic owner memory.', SegmentType.CONTEXT), importance_score=100, concept_title='Owner-only synthetic title')
     memory.importance_score = score
     store.get.return_value = memory
-    if operation == 'delete_memory':
-        result = await mcp_server._handle_delete_memory(store, {'segment_id': memory.id})
-    else:
-        result = await mcp_server._handle_update_score(store, {'segment_id': memory.id, 'new_score': 70})
+    result = await mcp_server._handle_update_score(store, {'segment_id': memory.id, 'new_score': 70})
     assert 'Owner-only' in result[0].text
     store.delete.assert_not_called()
     store.update_score.assert_not_called()

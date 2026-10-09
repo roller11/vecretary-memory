@@ -18,7 +18,7 @@ CANARY = 'synthetic-private-canary-42'
 def private_logs(monkeypatch, caplog):
     caplog.set_level(logging.INFO, logger='instinct-mcp')
     store = Mock(_read_only=False)
-    monkeypatch.setattr(mcp_server, 'get_store', lambda: store)
+    monkeypatch.setattr(mcp_server, 'bound_store', lambda: store)
     monkeypatch.setattr(nudge, 'tick_nudge_session', lambda *args, **kwargs: None)
     monkeypatch.setattr(instinct, 'tick_turn', lambda *args: None)
     monkeypatch.setattr(mcp_server.call_tool, '_last_fb_sync_check', time.monotonic(), raising=False)
@@ -39,9 +39,9 @@ async def test_dispatch_logs_no_arguments_or_exception_payload(private_logs, mon
     if outcome == 'failure':
         handler.side_effect = RuntimeError(CANARY)
     elif outcome == 'unavailable':
-        monkeypatch.setattr(mcp_server, 'get_store', lambda: None)
+        monkeypatch.setattr(mcp_server, 'bound_store', lambda: None)
     elif outcome == 'init_exception':
-        monkeypatch.setattr(mcp_server, 'get_store', Mock(side_effect=RuntimeError(CANARY)))
+        monkeypatch.setattr(mcp_server, 'bound_store', Mock(side_effect=RuntimeError(CANARY)))
     elif outcome == 'unknown':
         name = CANARY
     await mcp_server.call_tool(name, {'query': CANARY, 'title': CANARY, 'reason': CANARY})
@@ -67,8 +67,11 @@ async def test_mutation_logs_do_not_include_memory_metadata(private_logs, operat
     from instinct.models import ScoredSegment, Segment, SegmentType
     store.get.return_value = ScoredSegment(Segment('Synthetic note.', SegmentType.CONTEXT), importance_score=70, concept_title=CANARY)
     if operation == 'delete':
+        store.is_recycled.return_value = False
+        store.recycle.return_value = True
         await mcp_server.call_tool('instinct_delete_memory', {'segment_id': CANARY})
-        store.delete.assert_called_once_with(CANARY)
+        store.recycle.assert_called_once()
+        store.delete.assert_not_called()
     else:
         await mcp_server.call_tool('instinct_update_score', {'segment_id': CANARY, 'new_score': 71, 'reason': CANARY})
         store.update_score.assert_called_once_with(CANARY, 71, CANARY)
