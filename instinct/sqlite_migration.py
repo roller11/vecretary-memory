@@ -487,6 +487,9 @@ def import_runtime_bundle(bundle, destination, expected_identity, *, apply=False
         staging = Path(temporary)
         with SQLiteRecordStore.create(staging / 'sqlite', expected_identity) as store:
             store.insert_records(records)
+        identity_bytes = (canonical_json(expected_identity.to_dict()) + '\n').encode('ascii')
+        write_private_text(staging / 'embedding-identity.json',
+                           identity_bytes.decode('ascii'), replace=False)
         for name, raw in payloads.items():
             if name == 'records.json':
                 continue
@@ -506,6 +509,8 @@ def import_runtime_bundle(bundle, destination, expected_identity, *, apply=False
                                                  MAX_STATE_BYTES if name.count('/') == 1 else 1024 * 1024)
                 if restored != raw:
                     raise ValueError('Imported runtime state verification failed')
+        if _read_private_payload(staging / 'embedding-identity.json', 4096) != identity_bytes:
+            raise ValueError('Imported embedding identity verification failed')
         final_payloads, final_manifest, final_records = _validated_runtime_bundle(bundle, expected_identity)
         if payloads != final_payloads or manifest != final_manifest or records != final_records:
             raise ValueError('Migration bundle changed during import')

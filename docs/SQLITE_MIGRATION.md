@@ -89,13 +89,14 @@ assert result["verified"] is True
 assert result["runtime_ready"] is False
 ```
 
-Apply builds the database and sidecars in a sibling staging directory, verifies
-record readback and exact sidecar/queue bytes, then atomically publishes the new
-directory. Pending files are preserved byte-for-byte and classified for owner
-review; none are acknowledged or replayed by the importer. Invalid and legacy
-queue entries are retained rather than discarded. The separate queue-review flow
-can archive or explicitly convert supported legacy operations. Do not direct a
-running service at the staged directory: `runtime_ready` deliberately remains false
+Apply builds the database, canonical `embedding-identity.json`, and sidecars in a
+sibling staging directory. It verifies record readback, the exact identity bytes,
+and exact sidecar/queue bytes, then atomically publishes the new directory.
+Pending files are preserved byte-for-byte and classified for owner review; none
+are acknowledged or replayed by the importer. Invalid and legacy queue entries
+are retained rather than discarded. The separate queue-review flow can archive
+or explicitly convert supported legacy operations. Do not direct a running
+service at the staged directory: `runtime_ready` deliberately remains false
 until queue disposition, restart/clock/decay/pop behavior, and rollback acceptance
 pass separately.
 

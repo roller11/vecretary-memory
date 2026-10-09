@@ -12,7 +12,7 @@ from instinct.sqlite_migration import (
     import_runtime_bundle, read_manifest, write_manifest,
 )
 from instinct.private_storage import write_private_text
-from instinct.sqlite_records import EmbeddingIdentity, SQLiteRecord
+from instinct.sqlite_records import EmbeddingIdentity, SQLiteRecord, canonical_json
 from instinct.sqlite_session import SQLiteRuntimeSession
 from instinct.sqlite_store import SQLiteRecordStore
 
@@ -298,6 +298,8 @@ def test_runtime_bundle_stages_records_clock_config_and_queue_without_replay(tmp
     applied = import_runtime_bundle(bundle, destination, IDENTITY, apply=True)
     assert applied['applied'] and applied['verified']
     assert applied['runtime_ready'] is False
+    identity_bytes = (canonical_json(IDENTITY.to_dict()) + '\n').encode('ascii')
+    assert (destination / 'embedding-identity.json').read_bytes() == identity_bytes
     assert {name: (destination / name).read_bytes() for name in sidecars} == sidecars
     migrated_queue = next((destination / 'fallback_pending').glob('*.json'))
     assert migrated_queue.read_bytes() == queued_bytes

@@ -12,13 +12,12 @@ from instinct.private_storage import private_file_lock, write_private_text
 from instinct.models import ScoredSegment, Segment, SegmentType
 from instinct.sqlite_backup import restore_new, snapshot_offline
 from instinct.sqlite_guard import SQLiteWriterUnavailable
-from instinct.sqlite_records import EmbeddingIdentity, SQLiteRecord
+from instinct.sqlite_records import EmbeddingIdentity, SQLiteRecord, canonical_json
 from instinct.sqlite_session import SQLiteRuntimeSession
 from instinct.sqlite_store import SQLiteRecordStore
 
 
-@pytest.fixture
-def runtime(tmp_path):
+def _create_runtime(tmp_path):
     tmp_path.chmod(0o700)
     root = tmp_path / 'runtime'
     root.mkdir(mode=0o700)
@@ -33,9 +32,45 @@ def runtime(tmp_path):
     return root, identity
 
 
+@pytest.fixture
+def runtime(tmp_path):
+    return _create_runtime(tmp_path)
+
+
 def backup(runtime, tmp_path):
     root, identity = runtime
     return snapshot_offline(root, tmp_path / 'backup', identity)
+
+
+def test_cli_embedding_identity_is_preserved_by_offline_snapshot(tmp_path):
+    from instinct.sqlite_init import initialize
+
+    identity = EmbeddingIdentity('ollama', 'nomic-embed-text:latest', 2, 'cosine')
+    root = initialize(tmp_path / 'runtime', identity)
+    original = (root / 'embedding-identity.json').read_bytes()
+    snapshot = snapshot_offline(root, tmp_path / 'backup', identity)
+    assert (snapshot / 'embedding-identity.json').read_bytes() == original
+    restored = restore_new(snapshot, tmp_path / 'restored', identity)
+    assert (restored / 'embedding-identity.json').read_bytes() == original
+
+
+def test_identity_sidecar_mismatch_refuses_backup(tmp_path):
+    root, identity = _create_runtime(tmp_path)
+    other = EmbeddingIdentity('synthetic', 'different', 2, 'cosine')
+    write_private_text(root / 'embedding-identity.json',
+                       canonical_json(other.to_dict()) + '\n')
+    with pytest.raises(ValueError, match='Runtime embedding identity mismatch'):
+        snapshot_offline(root, tmp_path / 'backup', identity)
+    assert not (tmp_path / 'backup').exists()
+
+
+def test_malformed_identity_sidecar_refuses_backup(tmp_path):
+    root, identity = _create_runtime(tmp_path)
+    write_private_text(root / 'embedding-identity.json',
+                       '{"provider":"synthetic","provider":"ollama"}')
+    with pytest.raises(ValueError, match='Invalid runtime embedding identity'):
+        snapshot_offline(root, tmp_path / 'backup', identity)
+    assert not (tmp_path / 'backup').exists()
 
 
 def test_roundtrip_preserves_clock_pop_vectors_and_queue(runtime, tmp_path):

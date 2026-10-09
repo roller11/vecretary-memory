@@ -42,7 +42,7 @@ This profile must be assessed independently of earlier storage candidates.
 - Explicit final publication approval. Do not claim no vulnerabilities, production
   readiness, Windows support, indexed scalability or premium Wisdom availability.
 
-Security reporting is security@raw-wire.com. The owner reports successful delivery
-and forwarding; no alpha response SLA is promised. Issues are welcome; external
-code contributions are not initially accepted. Premium support/Wisdom remain
-separate from the MPL-2.0 core.
+Security reporting is security@raw-wire.com. General support and security
+response are best-effort; no response time or alpha SLA is promised. Issues are
+welcome; external code contributions are not initially accepted. Premium
+support/Wisdom remain separate from the MPL-2.0 core.

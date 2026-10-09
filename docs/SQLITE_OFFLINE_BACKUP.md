@@ -13,6 +13,10 @@ copies; it never modifies this snapshot. Subsequent backups target that package'
 
 - The recognized `sqlite/memory.sqlite3` database, including original vectors,
   metadata, active-time anchors, access counters and both pop mechanisms.
+- An optional `embedding-identity.json`; when present, it is strictly parsed,
+  required to match the requested provider/model/dimension/metric identity, and
+  preserved byte-for-byte. SQLite initialization and runtime migration create
+  this file; older compatible runtime roots may not have it.
 - Exact bytes of existing `session_state.json`, `nudge_state.json` and
   `dormancy_config.json`; missing files remain missing. Clock identity and the
   accumulated active-time value are not regenerated during backup/restore.

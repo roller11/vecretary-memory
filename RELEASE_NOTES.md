@@ -43,7 +43,7 @@ made. The vector-recall-dependent importance proposal is not implemented.
 
 ## Contact
 
-General support: support@raw-wire.com. Sensitive security reports:
+General support is best-effort via support@raw-wire.com; no response time or
+service-level agreement is guaranteed. Sensitive security reports:
 security@raw-wire.com. External code contributions are not accepted initially.
-Premium Wisdom and support remain separate from the MPL-2.0 core; no alpha
-support SLA is promised.
+Premium Wisdom and support remain separate from the MPL-2.0 core.

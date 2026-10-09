@@ -190,7 +190,8 @@ access/pop behavior and promotion rules remain unchanged.
 
 The public core uses plain [MPL-2.0](LICENSE), without premium-use restrictions.
 Wisdom is a separate private/premium API module, not bundled or required by this
-runtime. Premium support is offered separately; no alpha SLA is promised.
+runtime. General support is best-effort via support@raw-wire.com; no response
+time or service-level agreement is guaranteed. Premium support is offered separately.
 See [Wisdom boundary](docs/WISDOM_BOUNDARY.md) and
 [contribution policy](CONTRIBUTING.md): issues are welcome, external code
 contributions are not accepted initially.
@@ -204,5 +205,6 @@ memories, credentials or databases. See [security](SECURITY.md) and
 [Sponsor Vecretary's developer](https://github.com/sponsors/roller11) to help fund
 open-source maintenance, tests and documentation. Sponsorship is optional; it does
 not change MPL-2.0 rights, include Wisdom, purchase premium support or guarantee
-features or response times. Contact support@raw-wire.com about separately offered
-support. Sensitive vulnerability reports go to security@raw-wire.com.
+features or response times. General support is best-effort via
+support@raw-wire.com, with no response-time guarantee or service-level
+agreement. Sensitive vulnerability reports go to security@raw-wire.com.
