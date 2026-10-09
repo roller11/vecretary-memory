@@ -50,7 +50,7 @@ def main():
 
     assert Path(instinct.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     product = distribution('vecretary-memory')
-    assert product.version == '0.2.0a1'
+    assert product.version == '0.2.0a2'
     assert product.metadata['License-Expression'] == 'MPL-2.0'
     license_files = [file for file in product.files or ()
                      if str(file).endswith('.dist-info/licenses/LICENSE')]

@@ -1,4 +1,10 @@
-# Vecretary Memory 0.2.0a1 - SQLite alpha
+# Vecretary Memory 0.2.0a2 - SQLite alpha
+
+## Release update
+
+This follow-up release updates the package version and downloadable artifacts
+from 0.2.0a1. It contains no application behavior changes; the supported
+features and limits below remain the same.
 
 ## Included
 
@@ -26,8 +32,8 @@ sidecars are not committed atomically across files. Queued capture is not a
 committed save. Agent hard deletion, online backup/reset and writer handoff
 remain unsupported. Keep private runtime/queue/backup files out of the repository.
 
-This candidate adds read-only native SQLite provenance collection and pins the
-CI runner distribution to Ubuntu 24.04. It records loaded-library hashes and
+This release includes read-only native SQLite provenance collection and pins
+the CI runner distribution to Ubuntu 24.04. It records loaded-library hashes and
 package checksum evidence; collection alone is not advisory clearance. The
 prepublication RC26 passed hosted Python 3.11/3.12 checks, each with 859 passed
 and four optional skips, and 60-distribution audits with zero findings. Hosted

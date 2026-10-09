@@ -94,7 +94,7 @@ def test_sqlite_profile_is_chroma_free_and_hash_accounted(tmp_path):
     draft = tmp_path / 'draft'
     report = export.prepare(ROOT, draft, profile='sqlite')
     project = tomllib.loads((draft / 'pyproject.toml').read_text())['project']
-    assert project['version'] == '0.2.0a1'
+    assert project['version'] == '0.2.0a2'
     assert not any('chroma' in item.lower() for item in project['dependencies'])
     assert project['scripts']['vecretary-mcp'] == 'instinct.sqlite_service:cli'
     assert project['scripts']['vecretary-init'] == 'instinct.sqlite_init:cli'
