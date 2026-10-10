@@ -72,7 +72,7 @@ python -m pip wheel . --no-deps --wheel-dir dist
 Install that wheel with its constraints:
 
 ```sh
-python -m pip install -c requirements-linux.txt dist/vecretary_memory-0.2.0a2-py3-none-any.whl
+python -m pip install -c requirements-linux.txt dist/vecretary_memory-0.2.0a3-py3-none-any.whl
 ```
 
 An already-installed local Ollama model is required for text operations; there

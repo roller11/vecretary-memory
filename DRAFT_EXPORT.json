@@ -102,13 +102,13 @@
     {
       "source": "docs/sqlite-release/README.md",
       "path": "README.md",
-      "sha256": "db270504a2f02668b5a8d1f1ec811eebe4fa25728b9af2ab8030517e76b91ef2",
+      "sha256": "9faf6a685a1bab53f895f40928dfdcacbf288c32a4183f48592a69e582b0f5b0",
       "bytes": 9287
     },
     {
       "source": "docs/sqlite-release/README.md",
       "path": "docs/sqlite-release/README.md",
-      "sha256": "db270504a2f02668b5a8d1f1ec811eebe4fa25728b9af2ab8030517e76b91ef2",
+      "sha256": "9faf6a685a1bab53f895f40928dfdcacbf288c32a4183f48592a69e582b0f5b0",
       "bytes": 9287
     },
     {
@@ -126,14 +126,14 @@
     {
       "source": "docs/sqlite-release/RELEASE_NOTES.md",
       "path": "RELEASE_NOTES.md",
-      "sha256": "a5091fe434842bb19dda185bf66ef09516613c5fdaff72ed21c69e88e2965542",
-      "bytes": 2918
+      "sha256": "52eadd6db093caa96d4526474a8381c322a4c30b8e1d4f2e8809d09f681f7cbf",
+      "bytes": 3009
     },
     {
       "source": "docs/sqlite-release/RELEASE_NOTES.md",
       "path": "docs/sqlite-release/RELEASE_NOTES.md",
-      "sha256": "a5091fe434842bb19dda185bf66ef09516613c5fdaff72ed21c69e88e2965542",
-      "bytes": 2918
+      "sha256": "52eadd6db093caa96d4526474a8381c322a4c30b8e1d4f2e8809d09f681f7cbf",
+      "bytes": 3009
     },
     {
       "source": "docs/sqlite-release/SECURITY.md",
@@ -162,8 +162,8 @@
     {
       "source": "docs/sqlite-release/ci.yml",
       "path": ".github/workflows/ci.yml",
-      "sha256": "23e542e3ede07251df48365398d6b73efa3255477bca79ae394f148f3719f7d5",
-      "bytes": 2592
+      "sha256": "7c979d9a31d07cfbc33ace10bbebb60c052d46bd2d47fb3cf4881769fa623f5d",
+      "bytes": 2643
     },
     {
       "source": "docs/sqlite-release/ci.yml",
@@ -186,13 +186,13 @@
     {
       "source": "docs/sqlite-release/pyproject.toml",
       "path": "pyproject.toml",
-      "sha256": "edec999b2f02d5f669380004de72f4818fecada32a192dd1908544eb751e91b3",
-      "bytes": 904
+      "sha256": "415eafc485f33b896e07d0ca8821ab04a649b9fef6bbed882daf8f94bd1577e3",
+      "bytes": 1445
     },
     {
       "source": "docs/sqlite-release/pyproject.toml",
       "path": "docs/sqlite-release/pyproject.toml",
-      "sha256": "edec999b2f02d5f669380004de72f4818fecada32a192dd1908544eb751e91b3",
+      "sha256": "4dcdc06ea939abd4be04a084f32d057ed7b874c23dbe0d22807261e4298d691f",
       "bytes": 904
     },
     {
@@ -616,12 +616,6 @@
       "bytes": 5242
     },
     {
-      "source": "tests/test_chroma_candidate_builder.py",
-      "path": "tests/test_chroma_candidate_builder.py",
-      "sha256": "dc7721633df04ef8c80daa4081da94a4dfeabc7bc288e641bc3f106930e1372a",
-      "bytes": 2826
-    },
-    {
       "source": "tests/test_chroma_security_backport.py",
       "path": "tests/test_chroma_security_backport.py",
       "sha256": "16aa76853f40e9d0a887ad55abc96e78fc62a8fa0ad6af8c5a09576aae18a120",
@@ -774,8 +768,8 @@
     {
       "source": "tests/test_release_policy.py",
       "path": "tests/test_release_policy.py",
-      "sha256": "d5f1cb64e0bf10f91408ba420a245331d12d05937da204b688a51b14a24947e3",
-      "bytes": 5032
+      "sha256": "d1016a6a67c2064ea8d430b210c711e24011800c7081200302d7f45e61edc367",
+      "bytes": 6159
     },
     {
       "source": "tests/test_restore_acceptance.py",
@@ -786,8 +780,8 @@
     {
       "source": "tests/test_runtime.py",
       "path": "tests/test_runtime.py",
-      "sha256": "bd08c90740213a1ae959361f8cfe799884db8fc6e9143aa805998c6dc062dd50",
-      "bytes": 6946
+      "sha256": "f3e119749dcee5cd45c7c2ba6679ede4900d73925082210c526170cd2f8913b3",
+      "bytes": 6716
     },
     {
       "source": "tests/test_seed.py",
@@ -864,7 +858,7 @@
     {
       "source": "tests/test_sqlite_release.py",
       "path": "tests/test_sqlite_release.py",
-      "sha256": "0a1a2410a8bdfe556cdd1b5d178fb2b487e98be8c591db78a42be82840895f44",
+      "sha256": "9589cbe81dd494f428368a75b1371af1ba2d7c33bfd2f30d3d5d18f76d70f5c0",
       "bytes": 5402
     },
     {
@@ -942,7 +936,7 @@
     {
       "source": "tools/check_sqlite_installed.py",
       "path": "tools/check_sqlite_installed.py",
-      "sha256": "6516fb9a285793e52d28e5810918d0c94286116176b95d79b68323eea0b1a209",
+      "sha256": "e8cc78480208304d1be583e2b1738258ed55d96ef07b20ccc498f16f17737d4d",
       "bytes": 5044
     },
     {

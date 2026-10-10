@@ -51,18 +51,13 @@ def test_explicit_fallback_store_path_wins(monkeypatch, tmp_path):
     assert Path(_pending_dir(str(tmp_path / 'other'))) == tmp_path / 'other' / 'fallback_pending'
 
 
-def test_packaging_excludes_private_modules():
+def test_packaging_exposes_only_supported_sqlite_entrypoints():
     config = tomllib.loads((Path(__file__).resolve().parents[1] / 'pyproject.toml').read_text())
     assert config['tool']['setuptools']['packages']['find']['include'] == ['instinct', 'instinct.*']
     assert config['project']['scripts'] == {
-        'vecretary-mcp': 'instinct.mcp_server:cli',
-        'vecretary-dashboard': 'instinct.dashboard:main',
-        'vecretary-seed': 'instinct.seed:main',
-        'vecretary-backup': 'instinct.backup:main',
-        'instinct-mcp': 'instinct.mcp_server:cli',
-        'instinct-dashboard': 'instinct.dashboard:main',
-        'instinct-seed': 'instinct.seed:main',
-        'instinct-backup': 'instinct.backup:main',
+        'vecretary-mcp': 'instinct.sqlite_service:cli',
+        'vecretary-init': 'instinct.sqlite_init:cli',
+        'vecretary-sqlite': 'instinct.sqlite_service:cli',
     }
 
 

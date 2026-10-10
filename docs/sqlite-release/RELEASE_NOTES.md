@@ -1,10 +1,11 @@
-# Vecretary Memory 0.2.0a2 - SQLite alpha
+# Vecretary Memory 0.2.0a3 - SQLite alpha
 
 ## Release update
 
-This follow-up release updates the package version and downloadable artifacts
-from 0.2.0a1. It contains no application behavior changes; the supported
-features and limits below remain the same.
+This follow-up updates the package version and downloadable artifacts from
+0.2.0a2. It aligns release-policy/runtime tests and default pytest discovery
+with the supported SQLite alpha profile. It contains no application behavior
+changes; supported features and limits remain the same.
 
 ## Included
 

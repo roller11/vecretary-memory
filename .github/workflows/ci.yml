@@ -33,7 +33,7 @@ jobs:
           python -I tools/check_sqlite_installed.py
       - name: SQLite and existing lifecycle regressions
         shell: bash
-        run: python -m pytest tests/test_sqlite*.py tests/test_session_timer.py tests/test_nudge_session.py tests/test_active_time.py tests/test_pop_scoring.py tests/test_decay_bands.py tests/test_mandatory_lifecycle.py tests/test_dependency_license_collection.py tests/test_public_draft.py -q
+        run: python -m pytest tests/test_sqlite*.py tests/test_session_timer.py tests/test_nudge_session.py tests/test_active_time.py tests/test_pop_scoring.py tests/test_decay_bands.py tests/test_mandatory_lifecycle.py tests/test_dependency_license_collection.py tests/test_public_draft.py tests/test_release_policy.py tests/test_runtime.py -q
       - name: Dashboard reconnect and security regressions
         run: |
           node --version

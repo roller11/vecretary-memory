@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecretary-memory"
-version = "0.2.0a2"
+version = "0.2.0a3"
 description = "Vecretary Memory: local SQLite priority-memory MCP server and dashboard alpha"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,4 +31,21 @@ instinct = ["starter_memories.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Default collection is the supported SQLite alpha suite; run legacy tests by explicit path.
+python_files = [
+    "test_sqlite*.py",
+    "test_session_timer.py",
+    "test_nudge_session.py",
+    "test_active_time.py",
+    "test_pop_scoring.py",
+    "test_decay_bands.py",
+    "test_mandatory_lifecycle.py",
+    "test_dependency_license_collection.py",
+    "test_public_draft.py",
+    "test_release_policy.py",
+    "test_runtime.py",
+    "test_dashboard_security.py",
+    "test_dashboard_features.py",
+    "test_privacy_security_gates.py",
+]
 asyncio_mode = "auto"
