@@ -296,7 +296,7 @@ def test_mandatory_renewal_failure_leaves_turn_and_marker_pending(runtime, monke
         retried = owner.tick_activity(now=start + timedelta(minutes=1))
         assert retried.current_turn == 1
         with owner.operation() as adapter:
-            assert adapter.get(segment.id).importance_score == 100
+            assert adapter.get(segment.id).importance_score == 99
 
 
 def test_operation_exception_does_not_leak_active_operation(runtime):
@@ -331,7 +331,7 @@ with SQLiteRuntimeSession.open(sys.argv[2], EmbeddingIdentity('synthetic', 'fixe
             open_session(runtime, read_only=False)
         child.kill()
         child.wait(timeout=20)
-        with open_session(runtime, read_only=False) as owner:
+        with open_session(runtime, read_only=False, writer_timeout=2) as owner:
             tick = owner.tick_activity()
             assert tick.current_turn == 2
             assert tick.session.seconds_added_to_accumulator == 0

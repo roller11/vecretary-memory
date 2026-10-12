@@ -74,8 +74,21 @@ def capture_call(store, name, arguments):
         if not isinstance(reason, str) or '\x00' in reason or len(reason.encode('utf-8')) > 4096:
             error = 'Invalid queued score reasoning'
         operation = 'update_score'
+    elif name == 'instinct_delete_memory':
+        segment_id = arguments.get('segment_id', '')
+        try:
+            require_text(segment_id, 'record ID', 256)
+        except ValueError as failure:
+            error = str(failure)
+        else:
+            segment = store.get(segment_id)
+            error = 'Queued recycle target is missing' if segment is None else agent_target_error(segment)
+            if not error and store.is_recycled(segment_id):
+                error = 'Memory is already in the recycle bin'
+        payload = {'delete_id': segment_id}
+        operation = 'delete_memory'
     else:
-        raise ValueError('Only SQLite agent saves and score updates may be queued')
+        raise ValueError('Only SQLite agent saves, score updates, and recycle operations may be queued')
     if error:
         return 'BLOCKED: ' + error
     path = fallback_store.write_pending(operation, persist_dir=str(store.persist_dir),
@@ -120,8 +133,29 @@ def _apply(store, record):
             'timestamp': timestamp.isoformat(), 'score': segment.importance_score}
         store.add(segment)
         return
+    if record['operation'] == 'delete_memory':
+        segment_id = payload['delete_id']
+
+        def transform(metadata):
+            if receipt in _receipts(metadata):
+                return metadata
+            segment = store.get(segment_id)
+            error = agent_target_error(segment)
+            if error:
+                raise ValueError(error)
+            if not metadata.get('recycled_at'):
+                metadata = metadata | {
+                    'recycled_at': timestamp.isoformat(timespec='seconds'),
+                    'recycled_by': 'agent',
+                    'recycled_reason': 'Queued MCP recycle request',
+                }
+            return _append_receipt(metadata, receipt)
+
+        if store.repository._mutate_metadata(segment_id, transform) is None:
+            raise ValueError('Queued recycle target is missing')
+        return
     if record['operation'] != 'update_score':
-        raise ValueError('SQLite queued deletion is disabled')
+        raise ValueError('Unsupported SQLite pending write operation')
     reason = payload.get('score_reason', '')
     if not isinstance(reason, str) or '\x00' in reason or len(reason.encode('utf-8')) > 4096:
         raise ValueError('Invalid queued score reasoning')

@@ -3,7 +3,7 @@
 Instinct - Priority Retriever
 
 Retrieves context from the weighted vector store with mandatory
-score-100 items always included first.
+ active mandatory score-99-100 items always included first.
 
 Now includes modifier pipeline for time-based decay and pop mechanics.
 """
@@ -11,15 +11,12 @@ Now includes modifier pipeline for time-based decay and pop mechanics.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 
 from .models import ScoredSegment, RetrievalResult, SegmentType, PopResultRecord
 from .modifiers import ModifierPipeline, QueryContext, ScoringResult, create_default_pipeline
 from .pop import apply_pop, PopResult
 from .dormancy import DormancyConfig
-
-if TYPE_CHECKING:
-    from .store import InstinctStore
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +25,7 @@ logger = logging.getLogger(__name__)
 class RetrievalConfig:
     """Configuration for context retrieval."""
     
-    # Always retrieve all score-100 items
+    # Always retrieve all active mandatory score-99-100 items
     always_include_mandatory: bool = True
     
     # Max items to retrieve (excluding mandatory)
@@ -71,7 +68,7 @@ class PriorityRetriever:
     """
     Retrieves context with priority ordering.
     
-    1. Always retrieves all score-100 (mandatory) items
+    1. Always retrieves all active mandatory (score 99-100) items
     2. Retrieves query-relevant items sorted by effective score
     3. Respects token budget, mandatory items first
     4. Applies modifier pipeline (decay, pop, etc.)
@@ -80,7 +77,7 @@ class PriorityRetriever:
     
     def __init__(
         self,
-        store: "InstinctStore",
+        store: Any,
         config: Optional[RetrievalConfig] = None,
         pipeline: Optional[ModifierPipeline] = None,
     ):
@@ -144,7 +141,7 @@ class PriorityRetriever:
         result = RetrievalResult(query=query)
         accessed_ids = []
         
-        # 1. Always get mandatory items (score 100)
+        # 1. Always get active mandatory items (score 99-100)
         if self.config.always_include_mandatory:
             mandatory = self.store.get_mandatory()
             mandatory = [m for m in mandatory if self._should_include_mandatory(m, context)]
@@ -306,8 +303,7 @@ class PriorityRetriever:
             if pop_result.rule_applied == "none":
                 continue
 
-            # Persist the mutation. store.add() is upsert semantics for
-            # Chroma (it updates metadata for the existing ID).
+            # Persist the mutation using the adapter's idempotent record update.
             # FAILSAFE: if the store is read-only or the write fails, log
             # the warning and skip persistence — the in-memory mutation
             # still affects this retrieval result, it just won't survive
@@ -375,7 +371,7 @@ class PriorityRetriever:
         return self.store.get_by_score(min_score=min_score, limit=max_items)
     
     def retrieve_mandatory(self) -> List[ScoredSegment]:
-        """Retrieve only mandatory (score 100) items."""
+        """Retrieve only active mandatory (score 99-100) items."""
         return self.store.get_mandatory()
     
     def get_context_string(

@@ -7,8 +7,16 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from urllib.request import urlopen
+
+
+def console_script_path(name):
+    command = Path(sysconfig.get_path('scripts')) / name
+    if sys.platform == 'win32':
+        command = command.with_suffix('.exe')
+    return command
 
 
 async def check_stdio(root):
@@ -25,7 +33,7 @@ async def check_stdio(root):
             names = {tool.name for tool in (await connection.list_tools()).tools}
             assert names == {'instinct_get_context', 'instinct_get_mandatory',
                              'instinct_search', 'instinct_save_memory', 'instinct_get',
-                             'instinct_update_score'}
+                             'instinct_update_score', 'instinct_delete_memory'}
             result = await connection.call_tool('instinct_get_mandatory', {})
             assert not result.isError
             assert 'Error:' not in result.content[0].text
@@ -50,7 +58,7 @@ def main():
 
     assert Path(instinct.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
     product = distribution('vecretary-memory')
-    assert product.version == '0.2.0a1'
+    assert product.version == '0.2.0a2'
     assert product.metadata['License-Expression'] == 'MPL-2.0'
     license_files = [file for file in product.files or ()
                      if str(file).endswith('.dist-info/licenses/LICENSE')]
@@ -64,9 +72,7 @@ def main():
         'vecretary-init': 'instinct.sqlite_init:cli'}
     for entry in entrypoints.values():
         entry.load()
-        command = Path(sys.executable).parent / entry.name
-        if sys.platform == 'win32':
-            command = command.with_suffix('.exe')
+        command = console_script_path(entry.name)
         result = subprocess.run([str(command), '--help'], capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, entry.name
 

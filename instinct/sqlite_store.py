@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Experimental record repository; not a drop-in replacement for InstinctStore."""
+"""Owner-private SQLite record repository for the SQLite runtime."""
 
 import json
 import heapq

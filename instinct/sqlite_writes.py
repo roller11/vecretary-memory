@@ -3,16 +3,20 @@
 
 from copy import deepcopy
 from datetime import datetime
+import json
+import re
 
 from .active_time import capture_anchors, set_anchor
 from .models import ScoredSegment
 from .sqlite_queries import BoundQueryEmbedder
-from .sqlite_records import MAX_RECORD_BYTES, MAX_RECORDS, SQLiteRecord, require_text, validate_records
+from .sqlite_records import MAX_RECORD_BYTES, MAX_RECORDS, SQLiteRecord, canonical_json, require_text, validate_records
 from .sqlite_search import validate_vector
 
 
 MAX_WRITE_BATCH = 128
 MAX_DOCUMENT_BYTES = 64 * 1024
+MAX_SCORE_EXTENSION_BYTES = 64 * 1024
+_SCORE_EXTENSION_NAMESPACE = re.compile(r'[A-Za-z][A-Za-z0-9_.-]{0,127}\Z')
 
 
 class BoundDocumentEmbedder(BoundQueryEmbedder):
@@ -112,6 +116,32 @@ class SQLiteSegmentWrites:
             return metadata | self._changes(segment)
 
         return self.repository._mutate_metadata(segment_id, transform) is not None
+
+    def patch_score_extension(self, segment_id, namespace, changes):
+        self._require_writer()
+        require_text(segment_id, 'record ID', 256)
+        if not isinstance(namespace, str) or not _SCORE_EXTENSION_NAMESPACE.fullmatch(namespace):
+            raise ValueError('Invalid score extension namespace')
+        if not isinstance(changes, dict):
+            raise ValueError('Score extension changes must be an object')
+        encoded = canonical_json(changes)
+        if len(encoded.encode('ascii')) > MAX_SCORE_EXTENSION_BYTES:
+            raise ValueError('Score extension changes exceed the size limit')
+        normalized = json.loads(encoded)
+
+        def transform(metadata):
+            extensions = metadata.get('score_extensions', {})
+            if not isinstance(extensions, dict):
+                raise ValueError('Existing score extensions require owner review')
+            current = extensions.get(namespace, {})
+            if not isinstance(current, dict):
+                raise ValueError('Existing module score extension requires owner review')
+            return metadata | {
+                'score_extensions': extensions | {namespace: current | normalized},
+            }
+
+        updated = self.repository._mutate_metadata(segment_id, transform)
+        return self._segment(updated)
 
     def recycle(self, segment_id, by='dashboard', reason=''):
         self._require_writer()

@@ -4,7 +4,8 @@ The SQLite profile uses a separate public-export package definition and README;
 the legacy development defaults and live deployment remain unchanged.
 `vecretary-init` explicitly creates an empty new runtime;
 `vecretary-mcp` and `vecretary-sqlite` select the SQLite stdio/dashboard service.
-There are no Chroma, standalone legacy dashboard, seed or backup entrypoints.
+No external vector-store server, standalone legacy dashboard, seed or backup
+entrypoints are included.
 
 Exact linear scans, score rules, active-time timer and both pop pipelines remain.
 The SQLite service retains `runtime_ready=false` and its documented unsupported

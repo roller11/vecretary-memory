@@ -1,19 +1,21 @@
 # SQLite alpha release gates
 
 Passing automated tests alone does not authorize publication or live migration.
-This profile must be assessed separately from earlier Chroma candidates.
+This profile must be assessed independently of earlier storage candidates.
 
 ## Automated preparation
 
 1. Explicit new-root creation, correct identity and refusal to overwrite existing
    paths. No implicit migration, seed, provider fallback or model download.
 2. Isolated wheel metadata, MPL-2.0 license inclusion and SQLite console commands;
-   Chroma must not appear in the installed runtime dependency inventory.
+   no external vector-store package may appear in the runtime dependency inventory.
 3. Actual installed stdio initialization/tools, loopback dashboard health and
    explicit refusal of unbound content writes. Synthetic provider regressions
-   must preserve active-time timer, mandatory lifecycle and both pop mechanisms.
+   must preserve active-time timer, mandatory lifecycle, both pop mechanisms,
+   recoverable recycle/restore and namespaced score-extension metadata.
 4. Linux Python 3.11/3.12 regressions, including pending queues, guards,
-   observer immutability, backup/restore and validated exact linear scans.
+   observer immutability, backup/restore, recycle lifecycle and validated exact
+   linear scans. Migration tests must preserve full record metadata and embeddings.
 5. Complete current advisory scan of resolved runtime dependencies without
    suppression. The effective SQLite/Python runtime requires separate review.
    Capture source identity, compile options and native linkage for every tested
@@ -40,7 +42,7 @@ This profile must be assessed separately from earlier Chroma candidates.
 - Explicit final publication approval. Do not claim no vulnerabilities, production
   readiness, Windows support, indexed scalability or premium Wisdom availability.
 
-Security reporting is security@raw-wire.com. The owner reports successful delivery
-and forwarding; no alpha response SLA is promised. Issues are welcome; external
-code contributions are not initially accepted. Premium support/Wisdom remain
-separate from the MPL-2.0 core.
+Security reporting is security@raw-wire.com. General support and security
+response are best-effort; no response time or alpha SLA is promised. Issues are
+welcome; external code contributions are not initially accepted. Premium
+support/Wisdom remain separate from the MPL-2.0 core.

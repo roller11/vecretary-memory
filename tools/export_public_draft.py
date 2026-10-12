@@ -16,12 +16,19 @@ FIXED = {
     'THIRD_PARTY_NOTICES.md': 'THIRD_PARTY_NOTICES.md',
     'docs/WISDOM_BOUNDARY.md': 'docs/WISDOM_BOUNDARY.md',
     'docs/SQLITE_SERVICE_INTEGRATION.md': 'docs/SQLITE_SERVICE_INTEGRATION.md',
+    'docs/SQLITE_MIGRATION.md': 'docs/SQLITE_MIGRATION.md',
+    'docs/assets/dashboard-mobile-dark.png': 'docs/assets/dashboard-mobile-dark.png',
+    'docs/assets/dashboard-mobile-light.png': 'docs/assets/dashboard-mobile-light.png',
+    'instinct/assets/vecretary-logo-512.png': 'instinct/assets/vecretary-logo-512.png',
+    'instinct/assets/vecretary-logo-256.png': 'instinct/assets/vecretary-logo-256.png',
+    'instinct/assets/vecretary-logo-full.png': 'instinct/assets/vecretary-logo-full.png',
     'docs/DASHBOARD_AUTH_SECURITY.md': 'docs/DASHBOARD_AUTH_SECURITY.md',
     'docs/SQLITE_OFFLINE_BACKUP.md': 'docs/SQLITE_OFFLINE_BACKUP.md',
     'docs/SQLITE_PENDING_WRITES.md': 'docs/SQLITE_PENDING_WRITES.md',
     'docs/SQLITE_PURGE.md': 'docs/SQLITE_PURGE.md',
     'docs/SQLITE_QUEUE_REVIEW.md': 'docs/SQLITE_QUEUE_REVIEW.md',
     'docs/RC_ALPHA_NOTES.md': 'docs/RC_ALPHA_NOTES.md',
+    'docs/RC_TESTING.md': 'docs/RC_TESTING.md',
     'docs/RELEASE_GATES.md': 'docs/RELEASE_GATES.md',
     'docs/PUBLIC_README.md': 'README.md',
     'docs/PUBLIC_CLIENT_ACCEPTANCE.md': 'docs/CLIENT_ACCEPTANCE.md',
@@ -38,7 +45,6 @@ FIXED = {
     'tools/collect_dependency_licenses.py': 'tools/collect_dependency_licenses.py',
     'tools/collect_sqlite_runtime.py': 'tools/collect_sqlite_runtime.py',
     'tests/dashboard_capability_recovery.mjs': 'tests/dashboard_capability_recovery.mjs',
-    'tools/build_chroma_security_candidate.py': 'tools/build_chroma_security_candidate.py',
     '.github/workflows/ci.yml': '.github/workflows/ci.yml',
 }
 PATTERNS = (
@@ -63,22 +69,26 @@ SQLITE_OVERRIDES = {
     'docs/sqlite-release/requirements-linux.txt': 'requirements-linux.txt',
     'tools/check_sqlite_installed.py': 'tools/check_sqlite_installed.py',
 }
+BINARY_FILES = {
+    'docs/assets/dashboard-mobile-dark.png',
+    'docs/assets/dashboard-mobile-light.png',
+    'instinct/assets/vecretary-logo-512.png',
+    'instinct/assets/vecretary-logo-256.png',
+    'instinct/assets/vecretary-logo-full.png',
+}
 
 
-def prepare(source, destination, *, profile='legacy'):
-    if profile not in ('legacy', 'sqlite'):
+def prepare(source, destination, *, profile='sqlite'):
+    if profile != 'sqlite':
         raise ValueError('Unknown release profile')
     source = Path(source).resolve(strict=True)
     destination = Path(destination).resolve()
     if destination.exists() or source == destination or source.is_relative_to(destination):
         raise ValueError('Destination must be new and must not contain the source')
-    selected = dict(FIXED)
-    if profile == 'sqlite':
-        replaced = set(SQLITE_OVERRIDES.values())
-        selected = {original: target for original, target in selected.items()
-                    if target not in replaced and original not in (
-                        'tools/check_installed.py', 'tools/build_chroma_security_candidate.py')}
-        selected.update(SQLITE_OVERRIDES)
+    replaced = set(SQLITE_OVERRIDES.values())
+    selected = {original: target for original, target in FIXED.items()
+                if target not in replaced and original != 'tools/check_installed.py'}
+    selected.update(SQLITE_OVERRIDES)
     for directory in ('instinct', 'tests'):
         root = source / directory
         if root.is_symlink() or root.resolve().parent != source:
@@ -93,16 +103,14 @@ def prepare(source, destination, *, profile='legacy'):
         if file.is_symlink() or not file.resolve(strict=True).is_relative_to(source):
             raise ValueError(f'Unsafe source file: {original}')
         content = file.read_bytes()
-        if profile == 'sqlite' and target == 'MANIFEST.in':
-            content = content.replace(b'include tools/build_chroma_security_candidate.py\n', b'')
-            content = content.replace(b'include tools/build_chroma_security_candidate.py\r\n', b'')
-        text = content.decode('utf-8')
-        if any(pattern.search(text) for pattern in PATTERNS):
-            raise ValueError(f'Privacy/secret review required: {original}')
+        if original not in BINARY_FILES:
+            text = content.decode('utf-8')
+            if any(pattern.search(text) for pattern in PATTERNS):
+                raise ValueError(f'Privacy/secret review required: {original}')
         payloads[target] = content
         inventory.append({'source': original, 'path': target,
                           'sha256': hashlib.sha256(content).hexdigest(), 'bytes': len(content)})
-        if profile == 'sqlite' and original.startswith('docs/sqlite-release/'):
+        if original.startswith('docs/sqlite-release/'):
             payloads[original] = content
             inventory.append({'source': original, 'path': original,
                               'sha256': hashlib.sha256(content).hexdigest(), 'bytes': len(content)})
@@ -125,7 +133,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--destination', type=Path, required=True)
-    parser.add_argument('--profile', choices=('legacy', 'sqlite'), default='legacy')
+    parser.add_argument('--profile', choices=('sqlite',), default='sqlite')
     arguments = parser.parse_args()
     report = prepare(arguments.source, arguments.destination, profile=arguments.profile)
     print(json.dumps({'status': report['status'], 'files': len(report['files'])}))

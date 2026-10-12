@@ -57,7 +57,9 @@ def _validate_payload(operation, payload):
         if error:
             raise ValueError(error)
     elif operation == 'delete_memory':
-        if not payload.get('delete_id', '').strip():
+        delete_id = payload.get('delete_id', '')
+        if (not delete_id.strip() or len(delete_id) > 256 or '\x00' in delete_id or
+                len(delete_id.encode('utf-8')) > 256):
             raise ValueError('Queued delete requires a segment ID.')
     else:
         raise ValueError('Unknown queued operation.')
@@ -92,7 +94,7 @@ def _validate_record(record):
                 PurePosixPath(database).as_posix() != database):
             raise ValueError('Invalid SQLite queued database selection.')
         clock = record['active_clock']
-        if (record['operation'] not in ('save_memory', 'update_score') or parsed.tzinfo is not None or
+        if (record['operation'] not in ('save_memory', 'update_score', 'delete_memory') or parsed.tzinfo is not None or
                 not isinstance(clock, dict) or set(clock) != {'clock_id', 'seconds'} or
                 not isinstance(clock['clock_id'], str) or not 1 <= len(clock['clock_id']) <= 256 or
                 type(clock['seconds']) not in (int, float) or not math.isfinite(clock['seconds']) or clock['seconds'] < 0):

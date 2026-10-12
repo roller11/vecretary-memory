@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
+
 from copy import deepcopy
 from datetime import datetime, timedelta
 import json
 import re
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -39,7 +39,7 @@ class MemoryStore:
                 and (include_recycled or not memory.segment.metadata.get(RECYCLED_AT_KEY))][:limit]
 
     def get_mandatory(self):
-        return self.get_by_score(100, 100)
+        return self.get_by_score(99, 100)
 
     def update_metadata_only(self, memory):
         self.records[memory.id] = deepcopy(memory)
@@ -47,10 +47,8 @@ class MemoryStore:
 
 
 @pytest.fixture
-def memory_store(tmp_path, monkeypatch):
-    store = MemoryStore(tmp_path / 'data')
-    monkeypatch.setattr('instinct.store.InstinctStore', lambda **kwargs: store)
-    return store
+def memory_store(tmp_path):
+    return MemoryStore(tmp_path)
 
 
 def test_bundled_starter_is_synthetic_and_mandatory():
@@ -63,15 +61,6 @@ def test_bundled_starter_is_synthetic_and_mandatory():
     assert [memory.id for memory in seed.load_starter_memories()] == [memory.id for memory in memories]
     text = ' '.join(memory.segment.content for memory in memories)
     assert not re.search(r'[A-Za-z]:[\\/]|/home/|/mnt/', text)
-
-
-def test_preview_does_not_create_target(tmp_path, capsys):
-    target = tmp_path / 'not-created'
-    seed.main(['--data-dir', str(target)])
-    output = json.loads(capsys.readouterr().out)
-    assert output['applied'] is False
-    assert len(output['preview']) == 3
-    assert not target.exists()
 
 
 @pytest.mark.parametrize('invalid', [
@@ -87,96 +76,36 @@ def test_invalid_manifest_is_rejected(invalid, tmp_path, monkeypatch):
         seed.load_starter_memories()
 
 
-def test_apply_requires_owner_confirmation(tmp_path):
-    target = tmp_path / 'not-created'
-    with pytest.raises(SystemExit) as error:
-        seed.main(['--data-dir', str(target), '--apply'])
-    assert error.value.code == 2
-    assert not target.exists()
-
-
-def test_relative_target_is_rejected():
-    with pytest.raises(ValueError, match='absolute'):
-        seed.apply_starter(Path('relative-store'), seed.load_starter_memories())
-
-
-def test_unrecognized_store_is_not_opened_or_changed(tmp_path, monkeypatch):
-    target = tmp_path / 'unrecognized'
-    target.mkdir()
-    sentinel = target / 'chroma.sqlite3'
-    sentinel.write_bytes(b'not a real database')
-    factory = Mock()
-    monkeypatch.setattr('instinct.store.InstinctStore', factory)
-    with pytest.raises(ValueError, match='unrecognized'):
-        seed.apply_starter(target, seed.load_starter_memories())
-    factory.assert_not_called()
-    assert sentinel.read_bytes() == b'not a real database'
-    assert sorted(path.name for path in target.iterdir()) == ['chroma.sqlite3']
-
-
-def test_bootstrap_is_idempotent_and_preserves_owner_edits(memory_store):
+def test_seeding_is_idempotent_and_preserves_owner_edits(memory_store):
     memories = seed.load_starter_memories()
-    target = Path(memory_store.persist_dir)
-    first = seed.apply_starter(target, memories)
+    first = seed.apply_starter(memory_store, memories)
     assert len(first['created']) == 3
     original_id = memories[0].id
     edited = memory_store.records[original_id]
     edited.segment.content = 'Owner-edited installation-specific wording'
     edited.importance_score = 79
     edited.segment.metadata['owner_note'] = 'Keep this edit'
-    edited.segment.metadata[RECYCLED_AT_KEY] = '2026-10-03'
     before = deepcopy(memory_store.records)
-    marker_before = (target / seed.MARKER_NAME).read_bytes()
-    second = seed.apply_starter(target, memories)
+
+    second = seed.apply_starter(memory_store, memories)
+
     assert second['created'] == []
     assert len(second['preserved']) == 3
     assert memory_store.records == before
     assert memory_store.added == 3
-    assert (target / seed.MARKER_NAME).read_bytes() == marker_before
 
 
-def test_completed_bootstrap_preserves_owner_deletions(memory_store):
+def test_dry_seed_plan_preserves_owner_deletions(memory_store):
     memories = seed.load_starter_memories()
-    target = Path(memory_store.persist_dir)
-    seed.apply_starter(target, memories)
+    seed.apply_starter(memory_store, memories)
     deleted = memories[0].id
     del memory_store.records[deleted]
-    repeated = seed.apply_starter(target, memories)
-    assert repeated['created'] == []
-    assert repeated['preserved_missing'] == [deleted]
+
+    preview = seed.seed_memories(memory_store, memories, add_missing=False)
+
+    assert preview['created'] == []
+    assert preview['preserved_missing'] == [deleted]
     assert memory_store.count() == 2
-
-
-def test_interrupted_bootstrap_retries_only_missing_records(memory_store, monkeypatch):
-    memories = seed.load_starter_memories()
-    original_add = memory_store.add
-    def failing_add(memory):
-        if memory_store.added == 1:
-            raise RuntimeError('synthetic embedding failure')
-        return original_add(memory)
-    monkeypatch.setattr(memory_store, 'add', failing_add)
-    target = Path(memory_store.persist_dir)
-    with pytest.raises(RuntimeError, match='synthetic embedding failure'):
-        seed.apply_starter(target, memories)
-    assert json.loads((target / seed.MARKER_NAME).read_text())['state'] == 'initializing'
-    monkeypatch.setattr(memory_store, 'add', original_add)
-    resumed = seed.apply_starter(target, memories)
-    assert len(resumed['created']) == 2
-    assert len(resumed['preserved']) == 1
-    assert memory_store.count() == memory_store.added == 3
-    assert json.loads((target / seed.MARKER_NAME).read_text())['state'] == 'complete'
-
-
-def test_changed_marker_refuses_migration(memory_store):
-    memories = seed.load_starter_memories()
-    target = Path(memory_store.persist_dir)
-    seed.apply_starter(target, memories)
-    marker = target / seed.MARKER_NAME
-    marker.write_text('{"schema_version": 99}')
-    before = deepcopy(memory_store.records)
-    with pytest.raises(ValueError, match='migration'):
-        seed.apply_starter(target, memories)
-    assert memory_store.records == before
 
 
 def test_id_collision_is_checked_before_any_add(memory_store):
@@ -189,7 +118,7 @@ def test_id_collision_is_checked_before_any_add(memory_store):
     assert memory_store.added == 0
 
 
-def test_readonly_bootstrap_is_rejected(memory_store):
+def test_readonly_seeding_is_rejected(memory_store):
     memory_store._read_only = True
     with pytest.raises(ValueError, match='writable'):
         seed.seed_memories(memory_store, seed.load_starter_memories())
@@ -210,7 +139,7 @@ def test_seeded_session_restore_and_validation_token(memory_store):
     assert all(memory.importance_score == 79 for memory in memory_store.records.values())
     restored = tick_nudge_session(memory_store, now=started + timedelta(minutes=21))
     assert restored.new_session_started
-    assert all(memory.importance_score == 100 for memory in memory_store.records.values())
+    assert all(memory.importance_score == 99 for memory in memory_store.records.values())
     after = RetrievalResult(mandatory=memory_store.get_mandatory())
     assert before.mandatory_fingerprint == after.mandatory_fingerprint
     assert before.validation_token != after.validation_token

@@ -1,5 +1,17 @@
 # Vecretary Memory - SQLite alpha
 
+<p align="center"><img src="instinct/assets/vecretary-logo-full.png" width="220" alt="Vecretary"></p>
+
+<p align="center">Local, durable, priority-aware memory for MCP-capable agents.</p>
+
+The owner dashboard uses a charcoal and green theme in dark and light modes. Its
+primary navigation surfaces Memories, Score helper, Decay and Recycle bin; a
+prominent New memory action is separated from grouped secondary maintenance
+tools. Large workspace panels keep creation, retrieval and detail areas distinct.
+Static mobile-size previews (no live service status or memory data) are available
+in [dark theme](docs/assets/dashboard-mobile-dark.png) and
+[light theme](docs/assets/dashboard-mobile-light.png).
+
 Vecretary provides local, persistent, priority-aware memory for MCP-capable
 agents. Semantic recall finds related records; importance, active-time decay,
 mandatory context and temporary pops keep useful context readily available.
@@ -20,16 +32,22 @@ This alpha is not approved for regulated, hostile or multi-tenant environments.
 
 ## Implemented features
 
-- Embedded SQLite records and vectors; exact linear cosine scans, without Chroma
+- Embedded SQLite records and vectors; exact linear cosine scans, without an external vector-store dependency
   as an installed dependency. No database HTTP server is started.
 - Structured content, titles, IDs, memory types, importance and lifecycle metadata.
+- Future scoring modules can add namespaced JSON parameters without adding
+  module-specific SQLite columns; metadata extensions survive score updates and migration.
 - MCP context/mandatory retrieval, semantic search, individual reads, ordinary
-  saves and score updates. Agent deletion is intentionally excluded.
+  saves, eligible score updates and recoverable recycle requests. MCP recycling
+  never permanently deletes a record.
 - Existing identifier matching, result filtering, importance/modifier scoring,
   access tracking and both temporary-pop mechanisms. Search scoring is unchanged;
   it is not the proposed `importance + semantic / 2` formula.
 - Active-session timer, turn/session tick, mandatory renewal and nudge scheduling.
-  Idle time is not charged on restart. Tokens acknowledge retrieval, not compliance.
+  Scores 99-100 are surfaced; access lowers an elevated mandatory to 79 and its
+  configured turn interval (five turns by default) restores it to 99. Idle time
+  is not charged on restart.
+  Tokens acknowledge retrieval, not compliance.
 - Configurable initial-drop and later-decay periods, curves, floors and retention.
   Bands include 0-49, 50-79 and 80-89, whose default floor is 60; special upper
   profiles remain. Ordinary agent scores are capped at 92; mandatory/higher
@@ -38,16 +56,32 @@ This alpha is not approved for regulated, hostile or multi-tenant environments.
   decay previews/configuration, pop actions, nudge, recycle and restore.
 - One serialized owner serves stdio MCP and loopback HTTP, with bounded backlog;
   read-only observers do not acquire writer authority or advance the timer.
-- Explicit opt-in pending-save/score capture with receipt-based replay; capture
-  is not a committed save and does not provide automatic writer handoff.
+- Explicit opt-in pending-save/score/recycle capture with receipt-based replay;
+  capture is not a committed write and does not provide automatic writer handoff.
 - Offline backup/restore APIs, queue review and opt-in single-record recycled
   purge with exact ID confirmation. No implicit repair, migration or seeding.
+
+MCP recycle requests preserve records and vectors and can be restored from the
+dashboard. Permanent purge remains owner-only, separately gated and is not an MCP tool.
 
 Unsupported dashboard reset, online backup and writer-handoff routes fail closed.
 Database and timer/config/queue sidecars commit separately, not atomically.
 See [integration](docs/SQLITE_SERVICE_INTEGRATION.md),
+[offline migration and limits](docs/SQLITE_MIGRATION.md),
 [pending writes](docs/SQLITE_PENDING_WRITES.md),
 [offline backup](docs/SQLITE_OFFLINE_BACKUP.md) and [purge](docs/SQLITE_PURGE.md).
+
+## MCP tools
+
+| Tool | Purpose |
+| --- | --- |
+| `instinct_get_context` | Retrieve relevant, priority-ranked context. |
+| `instinct_get_mandatory` | Retrieve mandatory standing context. |
+| `instinct_search` | Search semantically with score and similarity filters. |
+| `instinct_get` | Retrieve one memory by exact ID without result truncation. |
+| `instinct_save_memory` | Store a new memory through the write guards. |
+| `instinct_update_score` | Update importance through owner and mandatory-record protections. |
+| `instinct_delete_memory` | Move an eligible memory to the recoverable recycle bin. |
 
 ## Fresh isolated setup
 
@@ -72,7 +106,7 @@ python -m pip wheel . --no-deps --wheel-dir dist
 Install that wheel with its constraints:
 
 ```sh
-python -m pip install -c requirements-linux.txt dist/vecretary_memory-0.2.0a1-py3-none-any.whl
+python -m pip install -c requirements-linux.txt dist/vecretary_memory-0.2.0a2-py3-none-any.whl
 ```
 
 An already-installed local Ollama model is required for text operations; there
@@ -113,7 +147,7 @@ use, not shared-computer isolation or remote hosting. See the
 See [client example](examples/mcp.json.example) and
 [agent instructions](examples/client-instructions.md). Without a provider binding,
 metadata reads work but text search/content writes fail explicitly. Never open
-untrusted databases or use legacy Chroma commands against a SQLite runtime.
+untrusted databases or tools from a different storage profile against a SQLite runtime.
 
 ## Performance and release limitations
 
@@ -130,10 +164,12 @@ An installed real-local-model check has also exercised text save/search through
 stdio, owner dashboard boundaries and timer/access/keyword-pop persistence across
 restart on isolated synthetic notes. That is not observed agent/chat/reload
 acceptance, crash recovery or a provider performance guarantee.
-Full auxiliary-state migration, broader provider compatibility, crash consistency
-remain separate gates. Legacy source modules
-are retained for compatibility review but their Chroma dependencies and commands
-are not installed or supported by this SQLite profile.
+The offline records-plus-sidecars migration scaffold is experimental; queue
+disposition, real-copy acceptance, broader provider compatibility and crash
+consistency remain separate gates. Legacy storage, lock, backup, and
+shared-writer modules are not included in this
+SQLite profile. The neutral offline migration exporter remains available for an
+already-open collection from a separate trusted source environment.
 
 ## Validation scope
 
@@ -157,7 +193,8 @@ access/pop behavior and promotion rules remain unchanged.
 
 The public core uses plain [MPL-2.0](LICENSE), without premium-use restrictions.
 Wisdom is a separate private/premium API module, not bundled or required by this
-runtime. Premium support is offered separately; no alpha SLA is promised.
+runtime. General support is best-effort via support@raw-wire.com; no response
+time or service-level agreement is guaranteed. Premium support is offered separately.
 See [Wisdom boundary](docs/WISDOM_BOUNDARY.md) and
 [contribution policy](CONTRIBUTING.md): issues are welcome, external code
 contributions are not accepted initially.
@@ -171,5 +208,6 @@ memories, credentials or databases. See [security](SECURITY.md) and
 [Sponsor Vecretary's developer](https://github.com/sponsors/roller11) to help fund
 open-source maintenance, tests and documentation. Sponsorship is optional; it does
 not change MPL-2.0 rights, include Wisdom, purchase premium support or guarantee
-features or response times. Contact support@raw-wire.com about separately offered
-support. Sensitive vulnerability reports go to security@raw-wire.com.
+features or response times. General support is best-effort via
+support@raw-wire.com, with no response-time guarantee or service-level
+agreement. Sensitive vulnerability reports go to security@raw-wire.com.

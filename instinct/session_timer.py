@@ -107,8 +107,8 @@ class _SessionStore:
     The session clock is single-writer per machine: the dashboard, the
     MCP server, and any probe scripts all share the same on-disk state.
     A small in-process RLock prevents torn writes inside one process.
-    Cross-process ordering is handled by the chroma_writer_lock for the
-    InstinctStore; the session clock is independent and fast (no
+    Cross-process ordering is handled by the owning storage service; the
+    session clock is independent and fast (no
     embedding, no SQL), so we don't share that lock to keep ticks
     cheap.
     """

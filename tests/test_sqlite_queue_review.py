@@ -16,12 +16,39 @@ from instinct.models import ScoredSegment, Segment, SegmentType
 from instinct.private_storage import write_private_text
 from instinct.sqlite_backup import snapshot_offline
 from instinct.sqlite_queue_review import inventory_snapshot, prepare_reviewed_restore
+from instinct.sqlite_queries import BoundQueryEmbedder
 from instinct.sqlite_records import EmbeddingIdentity, SQLiteRecord
 from instinct.sqlite_service import SQLiteService
 from instinct.sqlite_store import SQLiteRecordStore
+from instinct.sqlite_writes import BoundDocumentEmbedder
 
 
 IDENTITY = EmbeddingIdentity('synthetic', 'fixed', 2, 'cosine')
+
+
+class ReviewProvider:
+    def name(self):
+        return 'synthetic'
+
+    def get_config(self):
+        return {'provider': 'synthetic', 'model_name': 'fixed'}
+
+    def supported_spaces(self):
+        return ['cosine']
+
+    def embed_query(self, queries):
+        return [[1, 0] for _ in queries]
+
+    def embed_documents(self, documents):
+        return [[1, 0] for _ in documents]
+
+
+def review_bindings():
+    provider = ReviewProvider()
+    return {
+        'query_embedder': BoundQueryEmbedder(IDENTITY, provider),
+        'document_embedder': BoundDocumentEmbedder(IDENTITY, provider),
+    }
 
 
 @pytest.fixture
@@ -45,7 +72,7 @@ def source(tmp_path):
 
 def write_legacy(root, *, version=2, operation='save_memory'):
     path = Path(fallback_store.write_pending(operation, str(root),
-        title='Private synthetic title', content='Private synthetic content',
+        title='Private synthetic title', content='Private synthetic content for migration with more than fifty characters.',
         importance_score=80, segment_id='ordinary', new_score=70, delete_id='ordinary'))
     if version == 1:
         record = json.loads(path.read_bytes())
@@ -89,11 +116,102 @@ def test_legacy_inventory_preserves_all_bytes_without_payload_output(source, ver
     before = tree_bytes(saved)
     plan = inventory_snapshot(saved, IDENTITY)
     assert plan['files'][0]['classification'] == 'legacy_pending'
+    assert plan['files'][0]['legacy_operation'] == operation
     assert plan['files'][0]['action'] == 'retain'
     encoded = json.dumps(plan)
     assert 'Private synthetic title' not in encoded
     assert 'Private synthetic content' not in encoded
     assert tree_bytes(saved) == before
+
+
+@pytest.mark.parametrize(('version', 'operation', 'action'), [
+    (1, 'save_memory', 'convert_save'),
+    (2, 'save_memory', 'convert_save'),
+    (1, 'update_score', 'convert_score_update'),
+    (2, 'update_score', 'convert_score_update'),
+    (1, 'delete_memory', 'convert_soft_recycle'),
+    (2, 'delete_memory', 'convert_soft_recycle'),
+])
+def test_reviewed_legacy_operations_convert_and_archive_original(source, version, operation, action):
+    legacy = write_legacy(source, version=version, operation=operation)
+    legacy_bytes = legacy.read_bytes()
+    saved_snapshot = snapshot(source)
+    snapshot_before = tree_bytes(saved_snapshot)
+    source_before = tree_bytes(source)
+    plan = inventory_snapshot(saved_snapshot, IDENTITY)
+    plan['files'][0]['action'] = action
+    destination = source.parent / 'reviewed'
+
+    preview = prepare_reviewed_restore(saved_snapshot, destination, IDENTITY, plan)
+    assert preview['applied'] is False and preview['runtime_ready'] is False
+    assert preview['converted_files'] == 1 and preview['archived_files'] == 1
+    assert not destination.exists()
+
+    applied = prepare_reviewed_restore(saved_snapshot, destination, IDENTITY, plan, apply=True)
+    assert applied['applied'] is True and applied['converted_files'] == 1
+    archived = destination / 'archive/fallback_pending' / legacy.name
+    assert archived.read_bytes() == legacy_bytes
+    converted = next((destination / 'runtime/fallback_pending').glob('converted-*.json'))
+    record = json.loads(converted.read_bytes())
+    assert record['schema_version'] == 3 and record['operation'] == operation
+    assert record['sqlite_identity'] == IDENTITY.to_dict()
+    expected_payloads = {
+        'save_memory': {
+            'content': 'Private synthetic content for migration with more than fifty characters.',
+            'title': 'Private synthetic title',
+            'importance_score': 80, 'segment_type': 'context', 'reasoning': '',
+        },
+        'update_score': {'segment_id': 'ordinary', 'new_score': 70, 'score_reason': ''},
+        'delete_memory': {'delete_id': 'ordinary'},
+    }
+    assert record['payload'] == expected_payloads[operation]
+
+    runtime = destination / 'runtime'
+    with SQLiteService(runtime / 'sqlite', IDENTITY, persist_dir=runtime,
+                       read_only=False, replay_pending=True, **review_bindings()) as service:
+        if service.last_replay['failed']:
+            from instinct.sqlite_pending import _apply
+            pending_record = fallback_store.list_pending(str(runtime))[0]
+            service.inspect(lambda store: _apply(store, pending_record))
+        assert service.last_replay['synced'] == 1
+        if operation == 'save_memory':
+            saved_segment = service.inspect(lambda store: next(
+                item for item in store.get_by_score(limit=10)
+                if item.concept_title == 'Private synthetic title'))
+            assert saved_segment.segment.content == 'Private synthetic content for migration with more than fifty characters.'
+            assert saved_segment.importance_score == 80
+            assert service.inspect(lambda store: store.count()) == 2
+        elif operation == 'update_score':
+            assert service.inspect(lambda store: store.get('ordinary').importance_score) == 70
+            assert service.inspect(lambda store: store.count()) == 1
+        else:
+            assert record['payload'] == {'delete_id': 'ordinary'}
+            assert service.inspect(lambda store: store.is_recycled('ordinary'))
+            recycled = service.inspect(lambda store: store.get('ordinary'))
+            assert recycled is not None and recycled.segment.content == 'Synthetic review fixture'
+            assert service.inspect(lambda store: store.restore('ordinary')) is not None
+            assert not service.inspect(lambda store: store.is_recycled('ordinary'))
+            assert service.inspect(lambda store: store.get('ordinary').importance_score) == 80
+
+    assert legacy.exists() and legacy.read_bytes() == legacy_bytes
+    assert tree_bytes(saved_snapshot) == snapshot_before and tree_bytes(source) == source_before
+
+
+def test_reviewed_conversion_refuses_owner_only_targets(source):
+    with SQLiteRecordStore.open_writable(source / 'sqlite', IDENTITY) as repository:
+        repository.patch_metadata('ordinary', {'importance_score': 100, 'initial_score': 100})
+    legacy = write_legacy(source, operation='delete_memory')
+    legacy_bytes = legacy.read_bytes()
+    saved = snapshot(source)
+    plan = inventory_snapshot(saved, IDENTITY)
+    plan['files'][0]['action'] = 'convert_soft_recycle'
+    destination = source.parent / 'reviewed'
+
+    with pytest.raises(ValueError, match='Owner-only'):
+        prepare_reviewed_restore(saved, destination, IDENTITY, plan, apply=True)
+
+    assert not destination.exists()
+    assert legacy.read_bytes() == legacy_bytes
 
 
 def test_default_review_is_dry_run_and_retains_legacy(source):

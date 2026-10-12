@@ -2,28 +2,28 @@
 """
 instinct.nudge - Turn-based gentle nudge system for mandatory memories.
 
-A 100-score mandatory memory is "elevated" (visible to every agent call).
+A 99-100-score mandatory memory is "elevated" (visible to every agent call).
 To avoid force-feeding the same rule on every call, this module:
 
-  1. On access: drops an elevated mandatory memory's score by 21 (100 -> 79).
+  1. On access: drops an elevated mandatory memory to score 79 (99/100 -> 79).
      This is a true score mutation, like the other modifiers.
   2. On turn: increments a global turn counter. Each tool call = 1 turn.
   3. On check: for every mandatory segment that has been at 79 (or anywhere
-     below 100) for >= `nudge_interval_turns` turns, re-elevate it to 100
+     below 99) for >= `nudge_interval_turns` turns, re-elevate it to 99
      and reset its `last_nudged_turn` to the current turn.
 
 Per-segment `nudge_interval_turns` controls how aggressive the reminder
 is. Default is 5 turns. Set to 0 to disable nudging for a segment.
 
 The nudge is *gentle* — it only changes scores, not the stored content.
-After re-elevation to 100, the next access will drop it back to 79 and
+After re-elevation to 99, the next access will drop it back to 79 and
 the cycle repeats. This is the desired behavior: occasional reminders
 without spam.
 
 Public API:
     tick_nudge_session(store) -> TickResult - tick session and restore mandatory
     tick_turn(store) -> int              - increment global turn counter
-    apply_access_drop(seg, turn) -> bool - drop 100->79 on access (mutates)
+    apply_access_drop(seg, turn) -> bool - drop 99/100->79 on access (mutates)
     apply_nudge_check(store) -> dict     - re-elevate eligible segments
     get_current_turn(store) -> int       - read current turn without ticking
     get_nudge_state(seg) -> dict          - per-segment nudge metadata
@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .models import (
+    MANDATORY_SCORE_MIN,
     NUDGE_ACTIVE_KEY,
     NUDGE_INTERVAL_TURNS_KEY,
     NUDGED_AT_TURN_KEY,
@@ -49,10 +50,11 @@ from .private_storage import private_binary_reader, write_private_text, PrivateS
 
 logger = logging.getLogger("instinct.nudge")
 
-# Drop semantics: on access, an elevated (100) mandatory memory is dropped
-# to 79 and held there until the nudge timer re-elevates it. 100 - 21 = 79.
-DROP_AMOUNT = 21
-ELEVATED_SCORE = 100
+# Drop semantics: on access, an elevated (99-100) mandatory memory is dropped
+# to 79 and held there until the nudge timer re-elevates it.
+ELEVATED_SCORE = MANDATORY_SCORE_MIN
+DROPPED_SCORE = 79
+DROP_AMOUNT = ELEVATED_SCORE - DROPPED_SCORE
 DEFAULT_NUDGE_INTERVAL = 5  # turns
 
 
@@ -98,7 +100,7 @@ def get_current_turn(store) -> int:
     """Read the current turn counter without ticking.
 
     Args:
-        store: An InstinctStore (or anything with a `persist_dir` attribute).
+        store: A store adapter with a `persist_dir` attribute.
 
     Returns:
         Current global turn number (0 if never ticked).
@@ -265,7 +267,7 @@ def _set_last_accessed_turn(seg, turn: int) -> None:
 
 
 def get_last_nudged_turn(seg) -> int:
-    """Return the turn number at which the segment was last re-elevated to 100."""
+    """Return the turn number at which the segment was last re-elevated to 99."""
     val = (seg.segment.metadata or {}).get(NUDGED_AT_TURN_KEY)
     if val is None or val == "":
         return 0
@@ -286,9 +288,9 @@ def _set_last_nudged_turn(seg, turn: int) -> None:
 # =============================================================================
 
 def apply_access_drop(seg, current_turn: int) -> bool:
-    """On access of a mandatory segment, drop its score 100 -> 79.
+    """On access of a mandatory segment, drop its score 99/100 -> 79.
 
-    Only acts if the segment is currently at 100 (elevated state). Once
+    Only acts if the segment is currently elevated at 99 or 100. Once
     dropped, the segment stays at 79 until the nudge timer fires and
     re-elevates it. This means the agent receives the rule once, then
     it's quiet for N turns, then the rule reappears.
@@ -296,7 +298,7 @@ def apply_access_drop(seg, current_turn: int) -> bool:
     Returns:
         True if the drop was applied, False otherwise.
     """
-    if seg.importance_score != ELEVATED_SCORE:
+    if seg.importance_score < ELEVATED_SCORE:
         return False
     if not nudge_active(seg):
         return False
@@ -304,11 +306,11 @@ def apply_access_drop(seg, current_turn: int) -> bool:
     if seg.segment.segment_type not in MANDATORY_TYPES:
         return False
 
-    new_score = max(0, ELEVATED_SCORE - DROP_AMOUNT)
+    new_score = min(DROPPED_SCORE, max(0, seg.importance_score - DROP_AMOUNT))
     seg.importance_score = new_score
     _set_last_accessed_turn(seg, current_turn)
     logger.debug(
-        "nudge: dropped %s from 100 to %d (will re-elevate in %d turns)",
+        "nudge: dropped %s to %d (will re-elevate in %d turns)",
         seg.id[:12], new_score, get_nudge_interval(seg),
     )
     return True
@@ -323,7 +325,7 @@ def apply_nudge_check(store) -> Dict[str, int]:
 
     Also walks previously-elevated segments that have been dropped
     (score 79). If their `turns_since_access` has reached the interval,
-    they get re-elevated to 100 and the cycle resumes.
+    they get re-elevated to 99 and the cycle resumes.
 
     Returns:
         Stats dict with `scanned`, `elevated`, `skipped_disabled`, `skipped_recent`.
@@ -374,7 +376,7 @@ def apply_nudge_check(store) -> Dict[str, int]:
             store.update_metadata_only(seg)
             elevated += 1
             logger.info(
-                "nudge: first-elevated %s (%s) to 100 at turn %d",
+                "nudge: first-elevated %s (%s) to 99 at turn %d",
                 seg.id[:12], seg.concept_title[:30], current_turn,
             )
             continue
@@ -391,7 +393,7 @@ def apply_nudge_check(store) -> Dict[str, int]:
         store.update_metadata_only(seg)
         elevated += 1
         logger.info(
-            "nudge: re-elevated %s (%s) to 100 at turn %d (interval=%d)",
+            "nudge: re-elevated %s (%s) to 99 at turn %d (interval=%d)",
             seg.id[:12], seg.concept_title[:30], current_turn, interval,
         )
 
@@ -419,7 +421,7 @@ def apply_nudge_check(store) -> Dict[str, int]:
                 continue
             last_accessed_turn = get_turns_since_access(seg)
             if last_accessed_turn == 0:
-                # Never accessed but somehow not at 100 — treat as fresh.
+                # Never accessed but somehow not elevated — treat as fresh.
                 continue
             if current_turn - last_accessed_turn < interval:
                 skipped_recent += 1
@@ -433,7 +435,7 @@ def apply_nudge_check(store) -> Dict[str, int]:
             store.update_metadata_only(seg)
             elevated += 1
             logger.info(
-                "nudge: re-elevated dropped %s (%s) to 100 at turn %d "
+                "nudge: re-elevated dropped %s (%s) to 99 at turn %d "
                 "(turns_since_access=%d, interval=%d)",
                 seg.id[:12], seg.concept_title[:30], current_turn,
                 last_accessed_turn, interval,
@@ -451,10 +453,10 @@ def apply_nudge_check(store) -> Dict[str, int]:
 def _find_dropped_of_type(store, stype) -> list:
     """Find dropped mandatory segments of a given type.
 
-    A "dropped" segment is one that was previously at score 100 but
-    has been dropped to 79 by an access. We identify candidates by:
+    A "dropped" segment is one that was previously elevated at 99-100 but
+    has been dropped below 99 by an access. We identify candidates by:
       1. segment_type matches the given type
-      2. importance_score is in the dropped range (60..99)
+      2. importance_score is in the dropped range (60..98)
       3. metadata has a non-zero `turns_since_access` (was accessed)
       4. `nudge_active` is True in metadata
 
@@ -467,13 +469,13 @@ def _find_dropped_of_type(store, stype) -> list:
         type_value = stype.value if isinstance(stype, SegmentType) else stype
     except Exception:
         return []
-    # Range: 60..99. The canonical dropped score is 79, but other
+    # Range: 60..98. The canonical dropped score is 79, but other
     # modifiers could shift it. The lower bound 60 keeps us clear of
     # tail-band content.
     try:
         candidates = store.get_by_score(
             min_score=60,
-            max_score=99,
+            max_score=ELEVATED_SCORE - 1,
             limit=200,
         )
     except Exception:
@@ -511,7 +513,7 @@ def get_nudge_state(seg) -> Dict[str, Any]:
         "segment_type": seg.segment.segment_type.value,
         "is_mandatory_type": is_mand,
         "importance_score": seg.importance_score,
-        "is_elevated": seg.importance_score == ELEVATED_SCORE,
+        "is_elevated": seg.importance_score >= ELEVATED_SCORE,
         "nudge_active": active,
         "nudge_interval_turns": interval,
         "last_nudged_turn": last_nudged,
@@ -538,7 +540,7 @@ def nudge_summary(store) -> Dict[str, Any]:
         if interval <= 0:
             disabled += 1
             continue
-        if seg.importance_score == ELEVATED_SCORE:
+        if seg.importance_score >= ELEVATED_SCORE:
             elevated += 1
         else:
             dropped += 1

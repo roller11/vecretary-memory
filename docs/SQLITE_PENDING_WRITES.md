@@ -1,7 +1,8 @@
 # Experimental SQLite pending writes
 
 SQLite can now explicitly reuse the existing private pending-file capture codec,
-quotas and guards for ordinary agent saves and score updates. Both capture and
+quotas and guards for ordinary agent saves, score updates and recoverable recycle
+requests. Both capture and
 replay remain **off by default**. No live installation is changed by adding this
 source capability; `runtime_ready=false` remains intentional.
 
@@ -10,8 +11,8 @@ source capability; `runtime_ready=false` remains intentional.
 The existing SQLite service requires an explicit database directory, runtime root
 and embedding identity as described in the [integration guide](SQLITE_SERVICE_INTEGRATION.md).
 
-- Add `--read-only --queue-writes` for an observer that may capture MCP saves and
-  score updates into that root's `fallback_pending` directory. It does not change
+- Add `--read-only --queue-writes` for an observer that may capture MCP saves,
+  score updates and soft-recycle requests into that root's `fallback_pending` directory. It does not change
   records, tick the activity timer, change nudge state or reset an owner's
   monotonic clock. A normal observer without this flag remains byte-immutable.
 - Add `--replay-pending` for an owner. It replays at startup and before MCP calls
@@ -21,8 +22,8 @@ and embedding identity as described in the [integration guide](SQLITE_SERVICE_IN
   automatic owner/observer promotion or writer handoff. An existing owner with
   replay enabled can consume captures on its next request. Otherwise an owner
   must be started explicitly after the previous writer releases its guards.
-- Dashboard observer mutations still return read-only errors. Only the ordinary
-  MCP save/score tools capture; there is no unauthenticated HTTP queue endpoint.
+- Dashboard observer mutations still return read-only errors. Only MCP save,
+  score-update and soft-recycle tools capture; there is no unauthenticated HTTP queue endpoint.
 
 The equivalent API options are `SQLiteService(..., read_only=True,
 queue_writes=True)` and `SQLiteService(..., read_only=False,
@@ -36,9 +37,10 @@ New captures use pending schema 3, containing the original timestamp, ordinary
 agent authority, exact embedding identity, root-relative database selection, and a snapshot of the
 canonical activity clock. Original wall timestamps and captured active seconds
 survive replay; waiting while the owner is active counts toward retained-memory
-age, while idle wall time does not. A queued score change sets its pop anchor to
-the original capture point, preserving access counts, initial score, other pop
-state and the existing search-score formula.
+  age, while idle wall time does not. A queued score change sets its pop anchor to
+  the original capture point, preserving access counts, initial score, other pop
+  state and the existing search-score formula. A queued delete only sets recycle
+  metadata; it cannot permanently purge a record.
 
 Capture and replay enforce the 92 agent cap and protect mandatory types and
 owner-only initial scores, including temporarily suppressed owner memories.
@@ -48,13 +50,15 @@ Database/embedding/clock mismatches, future active-time anchors, missing/protect
 duplicate committed titles, embedding failures or invalid files are retained for
 review. Queued files do not grant owner privileges merely because they are private.
 
-Legacy schema 1/2 records, including deletes, are **not** automatically converted
-or replayed by this SQLite protocol. They remain unchanged for an explicitly
-reviewed migration. An [offline review/staging tool](SQLITE_QUEUE_REVIEW.md) can
-retain them or copy owner-approved archival evidence outside a new runtime queue,
-without guessing missing clock/model bindings. Conversely, the legacy Chroma dispatcher refuses schema 3.
-The adapter still advertises `pending_replay_ready=false` to prevent accidental
-use of that legacy dispatcher; the new service policy is separate and explicit.
+Legacy schema 1/2 records are **not** automatically converted or replayed by this
+SQLite protocol. An [offline review/staging tool](SQLITE_QUEUE_REVIEW.md) can retain
+or archive them, or explicitly convert a reviewed save, score update or delete
+into a schema-3 operation. Conversion binds to the snapshot identity and current
+clock; it preserves original timestamps but cannot reconstruct historical active
+time. Legacy saves are re-embedded on replay. Original queue bytes are archived,
+and converted deletes only soft-recycle. The SQLite runtime accepts only schema-3
+queue records, and the adapter advertises `pending_replay_ready=false` so
+unsupported adapters cannot replay them.
 
 ## Commit and recovery
 
@@ -93,6 +97,6 @@ commit-before-acknowledgement window. This does not certify every multi-file cra
 window, arbitrary model performance or power-loss directory durability.
 
 An [explicit owner-only recycled-record purge API](SQLITE_PURGE.md) requires an
-empty pending queue under the capture guard. Agent deletion, bulk purge/admin
+empty pending queue under the capture guard. Permanent agent deletion, bulk purge/admin
 reset, legacy queue migration and live switching remain separate gates.
-The default package still includes Chroma.
+This SQLite package does not interpret or replay legacy queue records automatically.

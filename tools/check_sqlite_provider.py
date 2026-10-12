@@ -69,7 +69,7 @@ async def check_stdio(root, provider_config, segment_id):
         async with ClientSession(reader, writer) as connection:
             await connection.initialize()
             names = {entry.name for entry in (await connection.list_tools()).tools}
-            assert 'instinct_delete_memory' not in names
+            assert 'instinct_delete_memory' in names
             read = await connection.call_tool('instinct_get', {'segment_id': segment_id})
             assert not read.isError and CONTENT in read.content[0].text
             found = await connection.call_tool('instinct_search', {

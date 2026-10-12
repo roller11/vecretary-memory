@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from instinct import dashboard, embedding_provider, fallback_store, mcp_server, ollama_embeddings
+from instinct import dashboard, embedding_provider, fallback_store, mcp_server
 from instinct.provider_privacy import validated_provider_url, valid_query_embedding
 from instinct.mcp_tools import get_instinct_tools
 from instinct.models import ProjectIdentity, Segment, SegmentType
@@ -23,22 +23,6 @@ CANARY = 'SYNTHETIC-PRIVATE-PROVIDER-CANARY'
 @pytest.mark.parametrize('vectors', [[], [[]], [1], [[float('nan')]], [[float('inf')]], [[True]], [['1']], [[[]]], [[1], [2]], 'invalid'])
 def test_rejects_invalid_embedding_shape_and_values(vectors):
     assert not valid_query_embedding(vectors)
-
-
-@pytest.mark.parametrize('array', [False, True])
-def test_readiness_accepts_lists_and_numpy_without_boolean_coercion(monkeypatch, array):
-    vectors = [[0.0, 0.5, -0.5]]
-    if array:
-        vectors = pytest.importorskip('numpy').array(vectors)
-    provider = SimpleNamespace(model_name='synthetic-test-model', name=lambda: 'synthetic', embed_query=lambda query: vectors)
-    monkeypatch.setattr(embedding_provider, 'get_embedding_provider', lambda: provider)
-    assert mcp_server._probe_embedding_readiness()['ready']
-
-
-def test_readiness_error_withholds_provider_content(monkeypatch):
-    monkeypatch.setattr(embedding_provider, 'get_embedding_provider', Mock(side_effect=RuntimeError(CANARY)))
-    result = mcp_server._probe_embedding_readiness()
-    assert not result['ready'] and CANARY not in json.dumps(result)
 
 
 @pytest.mark.parametrize('url', ['http://localhost:11434', 'http://127.0.0.1:11434', 'http://[::1]:11434'])
@@ -71,11 +55,10 @@ def test_remote_http_requires_separate_transport_opt_in(monkeypatch):
     assert validated_provider_url('http://synthetic.example') == 'http://synthetic.example'
 
 
-@pytest.mark.parametrize('provider_class', [embedding_provider.OllamaProvider, ollama_embeddings.OllamaEmbeddingFunction])
-def test_provider_failure_never_logs_or_returns_prompt(monkeypatch, caplog, provider_class):
+def test_provider_failure_never_logs_or_returns_prompt(monkeypatch, caplog):
     post = Mock(side_effect=RuntimeError(CANARY))
     monkeypatch.setattr('httpx.post', post)
-    provider = provider_class()
+    provider = embedding_provider.OllamaProvider()
     with pytest.raises(RuntimeError) as failure:
         provider([CANARY])
     assert CANARY not in str(failure.value)
@@ -276,11 +259,11 @@ def test_config_resource_bound():
         dashboard._validated_config_updates({'bump_decay_per_10': 1e100}, DormancyConfig())
 
 
-def test_static_readiness_never_returns_rejected_url(monkeypatch):
+def test_provider_constructor_rejects_credentials_before_network(monkeypatch):
     request_provider = Mock()
     monkeypatch.setattr('httpx.get', request_provider)
-    result = ollama_embeddings.OllamaEmbeddingFunction.check_readiness(base_url='http://user:' + CANARY + '@localhost:11434')
-    assert not result['ready'] and CANARY not in json.dumps(result)
+    with pytest.raises(ValueError):
+        embedding_provider.OllamaProvider(base_url='http://user:' + CANARY + '@localhost:11434')
     request_provider.assert_not_called()
 
 
@@ -297,11 +280,10 @@ def test_invalid_request_target_is_rejected(secured_dashboard, route):
     assert status == 400
 
 
-@pytest.mark.parametrize('provider_class', [embedding_provider.OllamaProvider, ollama_embeddings.OllamaEmbeddingFunction])
 @pytest.mark.parametrize('vector', [[float('nan')], [True], ['invalid'], []])
-def test_ollama_rejects_invalid_vectors(monkeypatch, provider_class, vector):
+def test_ollama_rejects_invalid_vectors(monkeypatch, vector):
     response = Mock()
     response.json.return_value = {'embedding': vector, 'embeddings': [vector]}
     monkeypatch.setattr('httpx.post', Mock(return_value=response))
     with pytest.raises(RuntimeError):
-        provider_class()(['Synthetic vector validation'])
+        embedding_provider.OllamaProvider()(['Synthetic vector validation'])

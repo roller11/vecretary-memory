@@ -1,16 +1,22 @@
 # Offline SQLite queue review and disposition
 
 This owner-operated preparation tool works only from a verified SQLite offline
-snapshot. It does not read Chroma, access a default store, stop services, switch
-backends, convert legacy operations, replay a queue or delete source files.
+snapshot. It does not open a live/default store, stop services, switch backends,
+automatically convert legacy operations, replay a queue or delete source files.
+Explicit reviewed actions can convert eligible legacy saves, score updates and
+deletes to SQLite schema-3 operations; originals are archived unchanged and
+deletes become recoverable recycle requests, never permanent purge.
 
 ## Why legacy files are not converted
 
 Schema-1/2 captures do not carry the schema-3 database, embedding and active-clock
-bindings. Their wall timestamps cannot reconstruct active-time creation/pop
-anchors. Guessing the missing state could age or reset a memory incorrectly.
-Legacy deletes also lack the newer replay/receipt policy. A private file does
-not grant owner authority or override ordinary-agent score/type guards.
+bindings. Their wall timestamps cannot reconstruct historical active-time
+creation/pop anchors. Explicit conversion therefore binds each operation to the
+snapshot's SQLite identity and current clock; it preserves the original timestamp
+but cannot recreate elapsed active time before that snapshot. Legacy saves are
+re-embedded by the configured SQLite provider during replay. Updates and recycle
+requests must target existing records and pass current agent authority checks. A
+private file does not grant owner authority.
 
 When possible, have the owner drain valid legacy work through its original
 supported runtime before preparing a stopped snapshot. That is a separately
@@ -29,8 +35,8 @@ python -m instinct.sqlite_queue_review --snapshot /absolute/private-snapshot --i
 ```
 
 The plan includes the entire snapshot fingerprint and each queue filename,
-SHA-256 checksum, classification and action. It excludes memory content, titles,
-target IDs and reasoning; filenames can still be sensitive. Keep plans private.
+SHA-256 checksum, classification, operation kind and action. It excludes memory
+content, titles, target IDs and reasoning; filenames can still be sensitive. Keep plans private.
 Every action defaults to `retain`. Classifications are:
 
 - `legacy_pending`: schema-1/2 data that passes the current ordinary-agent codec.
@@ -42,7 +48,11 @@ Every action defaults to `retain`. Classifications are:
   normal runtime checks; this label does not promise successful replay.
 
 The owner may change an individually reviewed `action` from `retain` to
-`archive`. No other field can change. Every file must appear once, in the
+`archive`, `convert_save`, `convert_score_update` or `convert_soft_recycle`, with
+the conversion action matching the reported legacy operation. Conversion
+preserves the original queued file in `archive/` and adds a schema-3 request to
+`runtime/fallback_pending/`; it does not apply that request. No other review field
+can change. Every file must appear once, in the
 original order, with its current classification and digest. A stale plan,
 changed snapshot, missing entry, unknown action or substituted file is refused.
 Checksums detect changes; they do not authenticate an owner or trusted exporter.
@@ -65,18 +75,22 @@ private snapshots or deciding the disposition of real pending work.
 The new package contains:
 
 - `runtime/`: byte-preserved database and recognized sidecars, plus retained
-  pending files. No records, embeddings, scores, timers, pop anchors or receipts
-  are recalculated. Runtime lock files are not copied.
+  pending files and any explicitly converted operations. No records,
+  embeddings, scores, timers, pop anchors or receipts are recalculated. Runtime
+  lock files are not copied.
 - `archive/fallback_pending/`: exact bytes of individually approved archived
-  files, including malformed data. It is outside the replay directory.
+  files, including malformed data and originals of converted legacy deletes. It
+  is outside the replay directory.
 - `QUEUE_REVIEW.json`: snapshot-bound decisions and counts; always reports
   `runtime_ready=false`, even with no retained blocked files.
 
-Archiving explicitly omits that pending operation from the new runtime queue;
-it does not apply the operation, mark the original capture synced, or delete it.
-Review desired memory effects before approving archival. Retained legacy or
-invalid files remain visibly blocked in the report. There is no default archive
-decision and no inferred active-time mapping.
+Archiving explicitly omits that pending operation from the new runtime queue; it
+does not apply the operation, mark the original capture synced, or delete it.
+Converted operations remain pending for normal owner replay, which rechecks guards
+and provider availability. Converted deletes only recycle; permanent purge is
+never generated. Retained legacy or invalid files remain visibly blocked in the
+report. There is no default archive/conversion decision or inferred historical
+active-time mapping.
 
 ## Retention, recovery and limits
 
@@ -96,6 +110,6 @@ Unknown snapshot state, integrity changes and unsafe paths fail closed. Pending
 and archived bytes remain plaintext, not encrypted or securely erased. Same-user
 malicious programs are outside the cooperative storage threat boundary.
 
-The default package still uses Chroma. This tool is not live-cutover permission,
-a backend selection change or a claim that dependency advisories are resolved.
+The package uses only the SQLite runtime. This tool is not live-cutover permission,
+a runtime switch or a claim that dependency advisories are resolved.
 See [pending writes](SQLITE_PENDING_WRITES.md) and [owner purge](SQLITE_PURGE.md).

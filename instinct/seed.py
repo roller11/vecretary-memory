@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Explicit owner bootstrap for a new, dedicated Instinct installation."""
+"""Owner-reviewed starter memories for explicitly configured store adapters."""
 
-import argparse
 from datetime import datetime
 from importlib.resources import files
 import json
-import os
-from pathlib import Path
 
 from .models import MANDATORY_TYPES, ScoredSegment, Segment, SegmentType
 
 
-MARKER_NAME = '.instinct-starter.json'
 SEED_TIMESTAMP = datetime(2000, 1, 1)
 
 
@@ -74,84 +70,6 @@ def seed_memories(store, memories, add_missing=True):
     return {'created': created, 'preserved': preserved, 'preserved_missing': missing}
 
 
-def check_target(target, marker, expected):
-    """Refuse unrelated stores and unrecognized or changed bootstrap manifests."""
-    if not target.is_absolute():
-        raise ValueError('Use an explicit absolute data directory.')
-    if target.is_symlink() or marker.is_symlink():
-        raise ValueError('Bootstrap target and marker must not be symlinks.')
-    if marker.exists():
-        from .private_storage import private_binary_reader
-        with private_binary_reader(marker) as source:
-            payload = json.load(source)
-        if not isinstance(payload, dict):
-            raise ValueError('Invalid starter marker.')
-        state = payload.pop('state', None)
-        if payload != expected or state not in ('initializing', 'complete'):
-            raise ValueError('Starter marker differs; review an explicit migration rather than reseeding.')
-        return state
-    elif target.exists():
-        if not target.is_dir():
-            raise ValueError('Data path is not a directory.')
-        allowed = {'.writer.lock'}
-        if any(entry.name not in allowed for entry in target.iterdir()):
-            raise ValueError('Refusing to seed a nonempty, unrecognized directory or live store.')
-
-
-def write_marker(target, marker, payload):
-    """Atomically reserve/complete bootstrap under the owner-held writer lock."""
-    from .private_storage import write_private_text
-    write_private_text(marker, json.dumps(payload, indent=2) + '\n')
-
-
-def apply_starter(target, memories):
-    """Lock and bootstrap only a fresh directory or a recognized starter install."""
-    from .chroma_writer_lock import acquire_writer_lock, release_writer_lock
-    from .store import InstinctStore
-
-    target = Path(target)
-    marker = target / MARKER_NAME
-    expected = {'schema_version': 1, 'templates': {memory.segment.metadata['starter_template_id']: memory.id for memory in memories}}
-    check_target(target, marker, expected)
-    from .private_storage import ensure_private_directory
-    ensure_private_directory(target)
-    handle = acquire_writer_lock(str(target), timeout=0)
-    try:
-        state = check_target(target, marker, expected)
-        if not marker.exists():
-            write_marker(target, marker, {**expected, 'state': 'initializing'})
-        store = InstinctStore(persist_dir=str(target))
-        result = seed_memories(store, memories, add_missing=state != 'complete')
-        if state != 'complete':
-            write_marker(target, marker, {**expected, 'state': 'complete'})
-        return result
-    finally:
-        release_writer_lock(handle)
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description='Preview or explicitly apply owner-reviewed synthetic starter memories')
-    parser.add_argument('--data-dir', required=True, help='Absolute dedicated installation data directory')
-    parser.add_argument('--apply', action='store_true', help='Write missing starter records; default is preview only')
-    parser.add_argument('--confirm-starter-base', action='store_true', help='Confirm owner review of all bundled starter memories')
-    arguments = parser.parse_args(argv)
-    if arguments.apply and not arguments.confirm_starter_base:
-        parser.error('--apply requires --confirm-starter-base after owner review')
-    try:
-        memories = load_starter_memories()
-        target = Path(arguments.data_dir).expanduser()
-        preview = [{
-            'template_id': memory.segment.metadata['starter_template_id'], 'id': memory.id,
-            'title': memory.concept_title, 'content': memory.segment.content,
-            'segment_type': memory.segment.segment_type.value, 'importance_score': 100,
-        } for memory in memories]
-        expected = {'schema_version': 1, 'templates': {memory.segment.metadata['starter_template_id']: memory.id for memory in memories}}
-        check_target(target, target / MARKER_NAME, expected)
-        result = apply_starter(target, memories) if arguments.apply else {'preview': preview}
-        print(json.dumps({'data_dir': str(target), 'applied': arguments.apply, **result}, indent=2))
-    except (OSError, ValueError, RuntimeError) as error:
-        parser.exit(1, f'Starter setup failed: {error}\n')
-
-
-if __name__ == '__main__':
-    main()
+def apply_starter(store, memories):
+    """Add only missing starter memories through the caller's SQLite adapter."""
+    return seed_memories(store, memories)

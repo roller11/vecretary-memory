@@ -1,7 +1,7 @@
 # Experimental SQLite offline backup
 
 This is an opt-in API for a stopped, isolated, single-collection SQLite runtime.
-It is not a live Chroma migration command or a dashboard backup endpoint.
+It is not a live database migration command or a dashboard backup endpoint.
 The default runtime remains unchanged and `runtime_ready` remains false.
 
 A verified snapshot can feed the [offline queue-review tool](SQLITE_QUEUE_REVIEW.md).
@@ -13,6 +13,10 @@ copies; it never modifies this snapshot. Subsequent backups target that package'
 
 - The recognized `sqlite/memory.sqlite3` database, including original vectors,
   metadata, active-time anchors, access counters and both pop mechanisms.
+- An optional `embedding-identity.json`; when present, it is strictly parsed,
+  required to match the requested provider/model/dimension/metric identity, and
+  preserved byte-for-byte. SQLite initialization and runtime migration create
+  this file; older compatible runtime roots may not have it.
 - Exact bytes of existing `session_state.json`, `nudge_state.json` and
   `dormancy_config.json`; missing files remain missing. Clock identity and the
   accumulated active-time value are not regenerated during backup/restore.
@@ -73,4 +77,5 @@ File flushes and directory rename are not a tested power-loss durability protoco
 
 Synthetic round-trip and failure tests accompany the API. Private real-provider
 acceptance is separate evidence; it does not certify arbitrary model identifiers,
-large workloads, all crash windows or a Chroma-free distribution.
+large workloads, all crash windows or complete distribution independence from
+native libraries.

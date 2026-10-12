@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecretary-memory"
-version = "0.2.0a1"
+version = "0.2.0a2"
 description = "Vecretary Memory: local SQLite priority-memory MCP server and dashboard alpha"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,7 +27,7 @@ include = ["instinct", "instinct.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-instinct = ["starter_memories.json"]
+instinct = ["starter_memories.json", "assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

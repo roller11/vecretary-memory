@@ -65,7 +65,7 @@ def store(tmp_path):
         return False
 
     memory_store.get_by_score.side_effect = get_by_score
-    memory_store.get_mandatory.side_effect = lambda: get_by_score(100, 100)
+    memory_store.get_mandatory.side_effect = lambda: get_by_score(99, 100)
     memory_store.update_metadata_only.side_effect = update_metadata_only
     return memory_store
 
@@ -82,7 +82,7 @@ def test_first_session_restores_mandatory_and_resets_baseline(store, segment_typ
     result = tick_nudge_session(store, now=datetime(2026, 10, 2, 10))
     memory = store.memories[0]
     assert result.new_session_started
-    assert memory.importance_score == 100
+    assert memory.importance_score == 99
     assert get_turns_since_access(memory) == 0
     assert get_last_nudged_turn(memory) == get_current_turn(store) == 1
     store.update.assert_not_called()
@@ -101,7 +101,7 @@ def test_active_session_keeps_drop_but_idle_session_restores_it(store):
     store.update_metadata_only.assert_not_called()
     result = tick_nudge_session(store, now=started + timedelta(minutes=21))
     assert result.new_session_started
-    assert store.memories[0].importance_score == 100
+    assert store.memories[0].importance_score == 99
     assert apply_access_drop(store.memories[0], tick_turn(store))
     for _ in range(5):
         tick_turn(store)
@@ -113,7 +113,7 @@ def test_restore_ignores_interval_and_disabled_nudging(store):
         NUDGE_ACTIVE_KEY: False, NUDGE_INTERVAL_TURNS_KEY: 0,
     })]
     tick_nudge_session(store)
-    assert store.memories[0].importance_score == 100
+    assert store.memories[0].importance_score == 99
     assert store.memories[0].segment.metadata[NUDGE_ACTIVE_KEY] is False
     assert store.memories[0].segment.metadata[NUDGE_INTERVAL_TURNS_KEY] == 0
 
@@ -132,7 +132,7 @@ def test_recycled_and_nonmandatory_memories_are_untouched(store):
 def test_restore_is_not_limited_to_200_memories(store):
     store.memories = [make_memory(content=f"Rule {index}") for index in range(205)]
     tick_nudge_session(store)
-    assert all(memory.importance_score == 100 for memory in store.memories)
+    assert all(memory.importance_score == 99 for memory in store.memories)
     assert store.update_metadata_only.call_count == 205
 
 
@@ -145,7 +145,7 @@ def test_readonly_session_is_restored_on_next_writable_tick(store):
     store._read_only = False
     result = tick_nudge_session(store, now=started + timedelta(seconds=1))
     assert result.new_session_started
-    assert store.memories[0].importance_score == 100
+    assert store.memories[0].importance_score == 99
 
 
 def test_external_session_tick_does_not_lose_reset(store):
@@ -154,7 +154,7 @@ def test_external_session_tick_does_not_lose_reset(store):
     tick_session(store.persist_dir, now=started)
     result = tick_nudge_session(store, now=started + timedelta(seconds=1))
     assert not result.new_session_started
-    assert store.memories[0].importance_score == 100
+    assert store.memories[0].importance_score == 99
 
 
 def test_failed_update_is_retried_within_same_session(store):
@@ -168,7 +168,7 @@ def test_failed_update_is_retried_within_same_session(store):
     assert store.memories[0].importance_score == 79
     store.update_metadata_only.side_effect = original_update
     tick_nudge_session(store, now=started + timedelta(seconds=1))
-    assert store.memories[0].importance_score == 100
+    assert store.memories[0].importance_score == 99
 
 
 def test_session_marker_survives_restart_without_repeating_restore(store):
@@ -183,27 +183,3 @@ def test_session_marker_survives_restart_without_repeating_restore(store):
     tick_nudge_session(store, now=started + timedelta(seconds=1))
     assert store.memories[0].importance_score == 79
     store.update_metadata_only.assert_not_called()
-
-
-def test_metadata_restore_uses_real_store_serialization_without_embeddings(tmp_path):
-    from instinct.store import InstinctStore
-
-    memory = make_memory(**{TURNS_SINCE_ACCESS_KEY: 7})
-    recycled = make_memory(content="Retired rule", **{RECYCLED_AT_KEY: "2026-10-01"})
-    real_store = object.__new__(InstinctStore)
-    real_store.persist_dir = str(tmp_path)
-    real_store._read_only = False
-    real_store._collection = Mock()
-    real_store._collection.count.return_value = 2
-    real_store._collection.get.return_value = {
-        "ids": [memory.id, recycled.id],
-        "documents": [memory.segment.content, recycled.segment.content],
-        "metadatas": [memory.to_storage_dict(), recycled.to_storage_dict()],
-    }
-    tick_nudge_session(real_store)
-    real_store._collection.update.assert_called_once()
-    update = real_store._collection.update.call_args.kwargs
-    assert set(update) == {"ids", "metadatas"}
-    assert update["ids"] == [memory.id]
-    assert update["metadatas"][0]["importance_score"] == 100
-    assert update["metadatas"][0][TURNS_SINCE_ACCESS_KEY] == 0

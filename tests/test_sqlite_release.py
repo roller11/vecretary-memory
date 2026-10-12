@@ -94,7 +94,7 @@ def test_sqlite_profile_is_chroma_free_and_hash_accounted(tmp_path):
     draft = tmp_path / 'draft'
     report = export.prepare(ROOT, draft, profile='sqlite')
     project = tomllib.loads((draft / 'pyproject.toml').read_text())['project']
-    assert project['version'] == '0.2.0a1'
+    assert project['version'] == '0.2.0a2'
     assert not any('chroma' in item.lower() for item in project['dependencies'])
     assert project['scripts']['vecretary-mcp'] == 'instinct.sqlite_service:cli'
     assert project['scripts']['vecretary-init'] == 'instinct.sqlite_init:cli'
@@ -120,3 +120,54 @@ def test_sqlite_profile_privacy_failure_precedes_output(tmp_path):
     with pytest.raises(ValueError, match='review required'):
         export.prepare(source, tmp_path / 'draft', profile='sqlite')
     assert not (tmp_path / 'draft').exists()
+
+
+@pytest.mark.asyncio
+async def test_installed_stdio_checker_accepts_the_runtime_tool_catalog(tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import mcp
+    import mcp.client.stdio
+    from instinct import mcp_server
+
+    checker_spec = importlib.util.spec_from_file_location(
+        'sqlite_installed_checker', ROOT / 'tools/check_sqlite_installed.py')
+    checker = importlib.util.module_from_spec(checker_spec)
+    checker_spec.loader.exec_module(checker)
+    session = AsyncMock()
+    session.__aenter__.return_value = session
+    session.list_tools.return_value = SimpleNamespace(tools=await mcp_server.list_tools())
+    session.call_tool.side_effect = [
+        SimpleNamespace(isError=False, content=[SimpleNamespace(text='No mandatory context')]),
+        SimpleNamespace(content=[SimpleNamespace(text='Error executing: embedding provider unbound')]),
+    ]
+
+    @asynccontextmanager
+    async def isolated_stdio(parameters):
+        assert parameters.command == sys.executable
+        assert parameters.args[:3] == ['-I', '-m', 'instinct.sqlite_service']
+        yield object(), object()
+
+    monkeypatch.setattr(mcp, 'ClientSession', lambda reader, writer: session)
+    monkeypatch.setattr(mcp.client.stdio, 'stdio_client', isolated_stdio)
+    await checker.check_stdio(tmp_path)
+    session.initialize.assert_awaited_once()
+    assert session.call_tool.await_count == 2
+
+
+@pytest.mark.parametrize('platform, executable', [
+    ('win32', 'vecretary-mcp.exe'), ('linux', 'vecretary-mcp'),
+])
+def test_installed_checker_uses_interpreter_scripts_directory(tmp_path, monkeypatch,
+                                                            platform, executable):
+    checker_spec = importlib.util.spec_from_file_location(
+        'sqlite_installed_checker', ROOT / 'tools/check_sqlite_installed.py')
+    checker = importlib.util.module_from_spec(checker_spec)
+    checker_spec.loader.exec_module(checker)
+    scripts = tmp_path / 'Scripts'
+    monkeypatch.setattr(checker.sysconfig, 'get_path', lambda name: str(scripts)
+                        if name == 'scripts' else None)
+    monkeypatch.setattr(checker.sys, 'platform', platform)
+    assert checker.console_script_path('vecretary-mcp') == scripts / executable

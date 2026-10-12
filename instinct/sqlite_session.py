@@ -122,10 +122,16 @@ class SQLiteRuntimeSession:
         raise NotImplementedError('SQLite queued writes require a reviewed replay protocol; no queue was read or changed')
 
     def close(self):
+        self._close(allow_active=False)
+
+    def close_for_handoff(self):
+        self._close(allow_active=True)
+
+    def _close(self, *, allow_active):
         if self._closed:
             return
         self._check_open()
-        if self._operation_active:
+        if self._operation_active and not allow_active:
             raise RuntimeError('Cannot close an active SQLite runtime operation')
         self._closed = True
         try:

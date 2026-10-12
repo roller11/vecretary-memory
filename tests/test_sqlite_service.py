@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import http.client
 import json
 from pathlib import Path
+import subprocess
 import sys
 import threading
 
@@ -20,12 +21,38 @@ from instinct.service_binding import bound_store
 from instinct.sqlite_queries import BoundQueryEmbedder
 from instinct.sqlite_records import EmbeddingIdentity
 from instinct.sqlite_runtime import SQLiteSegmentAdapter
-from instinct.sqlite_service import SQLiteService
+from instinct.sqlite_service import SQLiteDashboardHandler, SQLiteDashboardServer, SQLiteService
 from instinct.sqlite_store import SQLiteRecordStore
 from instinct.sqlite_writes import BoundDocumentEmbedder
 
 
 IDENTITY = EmbeddingIdentity('synthetic', 'fixed', 2, 'cosine')
+
+
+def test_sqlite_entrypoint_import_does_not_load_legacy_chroma_backend():
+    code = (
+        'import sys; import instinct; import instinct.sqlite_service; '
+        'import instinct.dashboard; import instinct.mcp_server; '
+        'assert "instinct.store" not in sys.modules; '
+        'assert "instinct.chroma_writer_lock" not in sys.modules; '
+        'assert "chromadb" not in sys.modules'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_legacy_store_is_not_exposed_by_the_sqlite_package():
+    code = (
+        'import sys; import instinct; import instinct.sqlite_service; '
+        'assert "instinct.store" not in sys.modules; '
+        'assert not hasattr(instinct, "InstinctStore")'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', code], capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 class SyntheticProvider:
@@ -68,8 +95,6 @@ def seed(root):
 @pytest.fixture
 def service(tmp_path, monkeypatch):
     seed(tmp_path)
-    monkeypatch.setattr(mcp_server, 'get_store', lambda: pytest.fail('Legacy store factory used'))
-    monkeypatch.setattr(mcp_server, '_try_upgrade_to_write', lambda store: pytest.fail('Legacy upgrade used'))
     monkeypatch.setattr(instinct, '_default_persist_dir', lambda: pytest.fail('Default storage path used'))
     with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
                        read_only=False, **bindings()) as instance:
@@ -101,6 +126,29 @@ async def tool(service, name, arguments):
     return '\n'.join(item.text for item in await service.call(name, arguments))
 
 
+@pytest.mark.parametrize('route, asset_name', [
+    ('/assets/vecretary-logo.png', 'vecretary-logo-512.png'),
+    ('/assets/vecretary-logo-256.png', 'vecretary-logo-256.png'),
+])
+def test_sqlite_dashboard_serves_only_the_packaged_logo_asset(service, route, asset_name):
+    from importlib import resources
+    service.start_dashboard()
+    port = service._http.server_port
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+    try:
+        connection.request('GET', route)
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.getheader('Content-Type') == 'image/png'
+        expected = resources.files('instinct').joinpath('assets', asset_name).read_bytes()
+        assert response.read() == expected
+    finally:
+        connection.close()
+    assert request(service, '/assets/unknown.png')[0] == 501
+    assert request(service, '/assets/../sqlite/memory.sqlite3')[0] == 501
+    assert request(service, route, headers={'Origin': 'https://foreign.invalid'})[0] == 403
+
+
 @pytest.mark.asyncio
 async def test_mcp_dispatch_reads_saves_scores_and_checks_authority(service):
     response = await tool(service, 'instinct_get_context', {'query': 'vector recall', 'new_session': True})
@@ -115,7 +163,13 @@ async def test_mcp_dispatch_reads_saves_scores_and_checks_authority(service):
     assert service.inspect(lambda store: store.get(saved_id).importance_score) == 60
     assert 'Blocked' in await tool(service, 'instinct_update_score', {'segment_id': saved_id, 'new_score': 93})
     assert 'BLOCKED' in await tool(service, 'instinct_update_score', {'segment_id': 'mandatory', 'new_score': 60})
-    assert 'disabled' in await tool(service, 'instinct_delete_memory', {'segment_id': saved_id})
+    recycled = await tool(service, 'instinct_delete_memory', {'segment_id': saved_id})
+    assert 'recoverable recycle bin' in recycled
+    assert service.inspect(lambda store: store.is_recycled(saved_id))
+    assert 'BLOCKED' in await tool(service, 'instinct_delete_memory', {'segment_id': 'mandatory'})
+    assert not service.inspect(lambda store: store.is_recycled('mandatory'))
+    assert service.inspect(lambda store: store.restore(saved_id)) is not None
+    assert not service.inspect(lambda store: store.is_recycled(saved_id))
     assert 'Found' in await tool(service, 'instinct_search', {'query': 'synthetic', 'min_similarity': 0})
 
 
@@ -143,7 +197,7 @@ async def test_each_mcp_connection_restores_its_own_pending_mandatory(service):
     await service.call('instinct_get', {'segment_id': 'ordinary'}, lifecycle=first)
     assert service.inspect(lambda store: store.get('mandatory').importance_score) == 79
     await service.call('instinct_get', {'segment_id': 'ordinary'}, lifecycle=second)
-    assert service.inspect(lambda store: store.get('mandatory').importance_score) == 100
+    assert service.inspect(lambda store: store.get('mandatory').importance_score) == 99
 
 
 @pytest.mark.asyncio
@@ -214,10 +268,26 @@ def test_closed_service_and_invalid_port_fail_without_default_fallback(service):
         service.inspect(lambda store: store.count())
 
 
+def test_dashboard_is_opt_in_and_server_rejects_non_loopback_bind(service):
+    assert service._http is None
+    with pytest.raises(ValueError, match='127.0.0.1 only'):
+        SQLiteDashboardServer(('0.0.0.0', 0), SQLiteDashboardHandler)
+    service.start_dashboard(0)
+    assert service._http.server_address[0] == '127.0.0.1'
+
+
 def test_http_dashboard_reads_html_and_readiness_without_chroma(service):
     status, html, headers = request(service, '/')
     assert status == 200
     assert 'Experimental SQLite integration' in html
+    assert 'handoff-to-dashboard' in html and 'handoff-to-mcp' in html
+    assert 'Use the controls above to transfer write access.' in html
+    assert 'Separate writer handoff is not available.' not in html
+    assert '.mode-banner .status { font-size: 11px; color: inherit; }' in html
+    assert 'id="recycle-link" aria-label="Recycle bin"' in html
+    assert 'border-radius: 10px' in html
+    assert '--bg: #d9dcda' in html
+    assert '--accent: #176331' in html
     assert 'Content-Security-Policy' in headers
     status, ready, _ = request(service, '/api/ready')
     assert status == 200 and ready['ok']
@@ -226,11 +296,30 @@ def test_http_dashboard_reads_html_and_readiness_without_chroma(service):
     assert request(service, '/api/health')[1]['embedding_probed'] is False
     assert request(service, '/api/stats')[1]['mandatory_count'] == 1
     assert request(service, '/api/list')[1]['count'] == 2
-    assert request(service, '/api/mode')[1]['handoff_supported'] is False
+    mode = request(service, '/api/mode')[1]
+    assert mode['handoff_supported'] is True and mode['dashboard_control'] is True
     assert request(service, '/api/decay/config')[0] == 200
     assert request(service, '/api/turn')[0] == 200
     assert request(service, '/api/mode?unknown=1')[0] == 400
     assert request(service, '/api/search?q=synthetic')[0] == 200
+
+
+@pytest.mark.parametrize('route', ['/', '/decay', '/score', '/modifier'])
+def test_handoff_controls_render_on_every_dashboard_page(service, route):
+    status, html, _ = request(service, route)
+    assert status == 200
+    assert 'handoff-to-dashboard' in html and 'handoff-to-mcp' in html
+    assert '/assets/vecretary-logo-256.png' in html
+    assert '--bg: #d9dcda' in html
+    assert '--accent: #176331' in html
+    assert 'dashboardApplySharedTheme' in html
+    assert 'standalone-theme-toggle' not in html
+    if route != '/':
+        assert 'body header.secondary-app-bar .primary-nav { gap: 5px; }' in html
+        assert 'body header.secondary-app-bar .primary-nav a {' in html
+        assert "header.classList.add('app-bar', 'secondary-app-bar')" in html
+        assert "nav.className = 'primary-nav'" in html
+        assert 'dashboardToggleSharedTheme' in html
 
 
 def test_http_writes_recycle_restore_config_and_pop(service):
@@ -253,6 +342,188 @@ def test_http_writes_recycle_restore_config_and_pop(service):
     assert service.inspect(lambda store: store.get('ordinary').keyword_hits_total) >= 3
 
 
+def test_mandatory_nudge_reappears_at_99_after_interval_and_access_drops_to_79(service):
+    reminder = ScoredSegment(
+        segment=Segment(content='Synthetic recurring mandatory reminder', stored_id='nudge-reminder',
+                        segment_type=SegmentType.STANDING_INSTRUCTION),
+        importance_score=99,
+        concept_title='Synthetic recurring reminder',
+    )
+    nudge.set_nudge_interval(reminder, 2)
+    service.inspect(lambda store: store.add(reminder))
+
+    first = asyncio.run(tool(service, 'instinct_get_mandatory', {}))
+    assert 'Synthetic recurring reminder' in first
+    assert service.inspect(lambda store: store.get('nudge-reminder').importance_score) == 79
+
+    asyncio.run(tool(service, 'instinct_get', {'segment_id': 'ordinary'}))
+    second = asyncio.run(tool(service, 'instinct_get_mandatory', {}))
+    assert 'Synthetic recurring reminder' in second
+    assert service.inspect(lambda store: store.get('nudge-reminder').importance_score) == 79
+
+
+def test_dashboard_mcp_handoff_pauses_and_resumes_tool_calls(service):
+    service.start_dashboard()
+    with service._state_lock:
+        service._stdio_active = True
+        service._mode = 'mcp'
+
+    mode = request(service, '/api/mode')[1]
+    assert mode['mcp_available'] is True and mode['dashboard_control'] is False
+
+    status, taken, _ = request(service, '/api/mode/take_control', method='POST')
+    assert status == 200 and taken['acquired'] and taken['mcp_paused']
+    assert service.dashboard_control is True
+    paused = asyncio.run(tool(service, 'instinct_get_mandatory', {}))
+    assert 'paused' in paused.lower()
+    paused_write = asyncio.run(tool(service, 'instinct_update_score', {
+        'segment_id': 'ordinary', 'new_score': 1,
+    }))
+    assert 'paused' in paused_write.lower()
+    assert service.inspect(lambda store: store.get('ordinary').importance_score) == 80
+
+    status, updated, _ = request(service, '/api/update_score', method='POST',
+                                 body={'id': 'ordinary', 'score': 70})
+    assert status == 200 and updated['score'] == 70
+
+    status, returned, _ = request(service, '/api/mode/return_control', method='POST')
+    assert status == 200 and returned['released'] and returned['mcp_resumed']
+    assert 'mcp_started' not in returned
+    assert service.dashboard_control is False
+    resumed = asyncio.run(tool(service, 'instinct_get', {'segment_id': 'ordinary'}))
+    assert 'Synthetic ordinary memory' in resumed
+
+
+def test_dashboard_handoff_requires_connected_mcp(tmp_path, monkeypatch):
+    seed(tmp_path)
+    monkeypatch.setattr(instinct, '_default_persist_dir', lambda: pytest.fail('Default storage path used'))
+    with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
+                       read_only=True, **bindings()) as observer:
+        observer.start_dashboard()
+        status, result, _ = request(observer, '/api/mode/take_control', method='POST')
+        assert status == 409 and not result['acquired']
+        assert observer.inspect(lambda store: store._read_only)
+
+
+def test_observer_queue_capture_disables_dashboard_handoff(tmp_path, monkeypatch):
+    seed(tmp_path)
+    monkeypatch.setattr(instinct, '_default_persist_dir', lambda: pytest.fail('Default storage path used'))
+    with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
+                       read_only=True, queue_writes=True, **bindings()) as observer:
+        observer.start_dashboard()
+        with observer._state_lock:
+            observer._stdio_active = True
+            observer._mode = 'mcp'
+        mode = request(observer, '/api/mode')[1]
+        assert mode['handoff_supported'] is False
+        status, result, _ = request(observer, '/api/mode/take_control', method='POST')
+        assert status == 409 and not result['acquired']
+        assert observer.inspect(lambda store: store._read_only)
+
+
+@pytest.mark.asyncio
+async def test_stdio_lifecycle_exposes_and_clears_mcp_handoff_receiver(service, monkeypatch):
+    from contextlib import asynccontextmanager
+    import mcp.server
+    import mcp.server.stdio
+
+    class FakeServer:
+        def __init__(self, name, *, lifespan):
+            self.request_context = None
+
+        def list_tools(self):
+            return lambda handler: handler
+
+        def call_tool(self):
+            return lambda handler: handler
+
+        def create_initialization_options(self):
+            return None
+
+        async def run(self, reader, writer, options):
+            assert service._stdio_active
+            assert service._mode == 'mcp'
+
+    @asynccontextmanager
+    async def fake_stdio_server():
+        yield object(), object()
+
+    monkeypatch.setattr(mcp.server, 'Server', FakeServer)
+    monkeypatch.setattr(mcp.server.stdio, 'stdio_server', fake_stdio_server)
+    await service.run_stdio()
+    assert not service._stdio_active
+    assert service._mode == 'dashboard'
+
+
+def test_dashboard_handoff_watchdog_returns_control_to_mcp(service):
+    service.start_dashboard()
+    with service._state_lock:
+        service._stdio_active = True
+        service._mode = 'mcp'
+    assert request(service, '/api/mode/take_control', method='POST')[0] == 200
+    deadline = service._dashboard_last_heartbeat + 31
+    assert service._expire_dashboard_lease(now=deadline)
+    assert not service.dashboard_control
+    assert request(service, '/api/mode')[1]['mode'] == 'mcp'
+
+
+def test_handoff_rejects_nonempty_body_without_changing_control(service):
+    service.start_dashboard()
+    with service._state_lock:
+        service._stdio_active = True
+        service._mode = 'mcp'
+    status, _, _ = request(service, '/api/mode/take_control', method='POST', body={'id': 'ordinary'})
+    assert status == 400
+    assert request(service, '/api/mode')[1]['mode'] == 'mcp'
+
+
+def test_cross_origin_cannot_return_dashboard_control(service):
+    service.start_dashboard()
+    with service._state_lock:
+        service._stdio_active = True
+        service._mode = 'mcp'
+    assert request(service, '/api/mode/take_control', method='POST')[0] == 200
+    assert request(service, '/api/mode/return_control', method='POST',
+                   headers={'Origin': 'https://attacker.invalid'})[0] == 403
+    assert service.dashboard_control
+    assert request(service, '/api/mode/return_control', method='POST')[0] == 200
+
+
+def test_read_only_mcp_session_promotes_only_after_exclusive_lock_is_acquired(tmp_path, monkeypatch):
+    seed(tmp_path)
+    monkeypatch.setattr(instinct, '_default_persist_dir', lambda: pytest.fail('Default storage path used'))
+    with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
+                       read_only=True, **bindings()) as observer:
+        observer.start_dashboard()
+        with observer._state_lock:
+            observer._stdio_active = True
+            observer._mode = 'mcp'
+        assert observer.inspect(lambda store: store._read_only)
+        status, result, _ = request(observer, '/api/mode/take_control', method='POST')
+        assert status == 200 and result['acquired']
+        assert not observer.inspect(lambda store: store._read_only)
+        assert request(observer, '/api/update_score', method='POST',
+                       body={'id': 'ordinary', 'score': 70})[0] == 200
+        status, result, _ = request(observer, '/api/mode/return_control', method='POST')
+        assert status == 200 and result['mcp_resumed']
+
+
+def test_handoff_refuses_competing_sqlite_writer_without_touching_it(tmp_path, monkeypatch):
+    seed(tmp_path)
+    monkeypatch.setattr(instinct, '_default_persist_dir', lambda: pytest.fail('Default storage path used'))
+    with SQLiteRecordStore.open_writable(tmp_path / 'sqlite', IDENTITY) as external_writer:
+        with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
+                           read_only=True, **bindings()) as observer:
+            observer.start_dashboard()
+            with observer._state_lock:
+                observer._stdio_active = True
+                observer._mode = 'mcp'
+            status, result, _ = request(observer, '/api/mode/take_control', method='POST')
+            assert status == 409 and not result['acquired']
+            assert observer.inspect(lambda store: store._read_only)
+            assert external_writer.count() == 2
+
+
 def test_stats_tracks_recycled_identifiers_access_and_pop_without_embeddings(service):
     assert service.inspect(lambda store: store.stats())['total_segments'] == 2
     service.inspect(lambda store: store.record_access('ordinary'))
@@ -264,8 +535,7 @@ def test_stats_tracks_recycled_identifiers_access_and_pop_without_embeddings(ser
     assert stats['identifier_terms'] == service.inspect(lambda store: len(set(store.get('mandatory').memory_identifiers)))
 
 
-@pytest.mark.parametrize('path', ['/api/delete', '/api/purge', '/api/admin/reset',
-    '/api/mode/take_control', '/api/mode/return_control', '/api/mode/edit'])
+@pytest.mark.parametrize('path', ['/api/delete', '/api/purge', '/api/admin/reset', '/api/mode/edit'])
 def test_unsupported_http_operations_are_fail_closed(service, path):
     before = service.inspect(lambda store: store.count())
     assert request(service, path, method='POST', body={'id': 'ordinary'})[0] == 501
@@ -276,8 +546,11 @@ def test_unsupported_http_operations_are_fail_closed(service, path):
     {'Host': 'attacker.invalid'}, {'Origin': 'https://attacker.invalid'},
     {'Sec-Fetch-Site': 'cross-site'}, {'X-Instinct-Capability': 'invalid'},
 ])
-def test_http_mutation_boundary_rejects_unauthorized_requests(service, headers):
-    assert request(service, '/api/update_score', method='POST',
+@pytest.mark.parametrize('path', [
+    '/api/update_score', '/api/mode/take_control', '/api/mode/return_control',
+])
+def test_http_mutation_boundary_rejects_unauthorized_requests(service, headers, path):
+    assert request(service, path, method='POST',
                    body={'id': 'ordinary', 'score': 1}, headers=headers)[0] == 403
     assert service.inspect(lambda store: store.get('ordinary').importance_score) == 80
 
@@ -321,13 +594,39 @@ async def test_observer_never_queues_writes_or_changes_sidecars(tmp_path):
                        read_only=True, **bindings()) as observer:
         assert 'read-only' in await tool(observer, 'instinct_save_memory', {'content': 'fixture', 'title': 'Observer fixture'})
         assert 'read-only' in await tool(observer, 'instinct_update_score', {'segment_id': 'ordinary', 'new_score': 70})
-        assert 'Mandatory renewal pending' in await tool(observer, 'instinct_get_mandatory', {})
+        assert 'Mandatory renewal is pending' in await tool(observer, 'instinct_get_mandatory', {})
         assert request(observer, '/api/heartbeat', method='POST')[0] == 409
         assert request(observer, '/api/decay/config', method='POST', body={'session_idle_minutes': 12})[0] == 409
         assert request(observer, '/api/list')[0] == 200
         assert request(observer, '/api/decay/config')[0] == 200
     after = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_observer_queues_recycle_and_owner_replay_keeps_it_recoverable(service, tmp_path):
+    with SQLiteService(tmp_path / 'sqlite', IDENTITY, persist_dir=tmp_path,
+                       read_only=True, queue_writes=True, **bindings()) as observer:
+        result = await tool(observer, 'instinct_delete_memory', {'segment_id': 'ordinary'})
+        assert 'Queued to SQLite FALLBACK' in result
+        assert 'BLOCKED' in await tool(observer, 'instinct_delete_memory', {'segment_id': 'mandatory'})
+        pending = fallback_store.list_pending(str(tmp_path))
+        assert len(pending) == 1 and pending[0]['operation'] == 'delete_memory'
+        assert not service.inspect(lambda store: store.is_recycled('ordinary'))
+
+    from instinct.sqlite_pending import replay
+    replayed = service.inspect(replay)
+    assert replayed['synced'] == 1 and not replayed['pending']
+    assert service.inspect(lambda store: store.is_recycled('ordinary'))
+    record = service.inspect(lambda store: store.get('ordinary'))
+    assert record is not None and record.concept_title == 'Synthetic ordinary memory'
+    assert record.segment.metadata['recycled_by'] == 'agent'
+    receipts = record.segment.metadata['sqlite_pending_receipts']
+    assert len(receipts) == 1 and len(receipts[0]) == 64
+    assert service.inspect(lambda store: store.restore('ordinary')) is not None
+    assert not service.inspect(lambda store: store.is_recycled('ordinary'))
+    assert service.inspect(lambda store: store.get('ordinary')).segment.metadata['sqlite_pending_receipts'] == receipts
+    assert fallback_store.list_pending(str(tmp_path)) == []
 
 
 def run_synthetic_stdio(root):
@@ -347,7 +646,7 @@ async def test_real_stdio_mcp_transport_initializes_lists_and_saves(tmp_path):
             initialized = await connection.initialize()
             assert initialized.serverInfo.name == 'vecretary-sqlite-experimental'
             tools = await connection.list_tools()
-            assert 'instinct_delete_memory' not in {item.name for item in tools.tools}
+            assert 'instinct_delete_memory' in {item.name for item in tools.tools}
             result = await connection.call_tool('instinct_get_context', {'query': 'vector recall', 'new_session': True})
             assert not result.isError
             assert 'Found' in result.content[0].text

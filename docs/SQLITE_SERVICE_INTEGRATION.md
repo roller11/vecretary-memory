@@ -1,19 +1,16 @@
-# Experimental SQLite MCP/dashboard integration
+# SQLite MCP/dashboard integration
 
-This is an opt-in next-release integration, not a live installation switch or
-publication clearance. The default console commands still use Chroma.
-`runtime_ready=false` remains deliberate. No real memory store is used by the
-integration tests.
+The published alpha's `vecretary-mcp` entry point selects the SQLite service.
+It requires an explicitly initialized, new SQLite runtime root and never
+implicitly migrates, repairs, seeds or switches a legacy store. The integration
+tests use synthetic data only. Passing them does not authorize a live migration.
 
-An explicit SQLite-only public draft profile is now available through
-`tools/export_public_draft.py --profile sqlite`. It supplies separate packaging,
-README, security policy, installed checks and Linux CI, without changing the
-legacy source defaults or live deployment. Its `vecretary-init` command creates
-an empty new root with an explicit Ollama/cosine identity; initialization does
-not probe the provider. Existing roots are never overwritten. An interrupted
-initialization may leave a partial root: review it and choose another new path,
-rather than attempting implicit repair. See [SQLite alpha README](sqlite-release/README.md).
-This draft remains subject to final release gates, not cleared for publication.
+`vecretary-init` creates an empty new root with an explicit Ollama/cosine
+identity; initialization does not probe the provider. Existing roots are never
+overwritten. An interrupted initialization may leave a partial root: review it
+and choose another new path rather than attempting implicit repair. See the
+[SQLite alpha README](sqlite-release/README.md) and the
+[offline migration and limits](SQLITE_MIGRATION.md).
 
 ## Ownership and request routing
 
@@ -24,9 +21,13 @@ to arbitrary executor workers. At most 16 requests can be in flight or queued.
 Shutdown drains accepted operations before closing the owning connection.
 
 Stdio MCP and the browser dashboard can share this owner in one process. Each
-stdio connection has its own mandatory-renewal lifecycle. There is no new shared
-writer socket protocol or automatic writer takeover. Other owners of the same
-runtime root are rejected. Read-only observers acquire neither writer guard.
+stdio connection has its own mandatory-renewal lifecycle. The dashboard offers
+an explicit, same-origin handoff: MCP tool calls pause while dashboard routes
+hold logical write control, then resume when control returns to MCP. The host-
+owned stdio process stays connected; the dashboard does not kill or relaunch it.
+When an observer session is promoted, the service must first acquire SQLite's
+writer guard; a competing owner causes a safe refusal without removing locks.
+Read-only observers acquire neither writer guard until a handoff succeeds.
 
 Request-local bindings select the adapter, dormancy configuration and default
 activity clock without changing legacy global stores or environment configuration.
@@ -40,17 +41,23 @@ cross-file operation or an exactly-once protocol.
 
 - MCP context, mandatory reads, semantic search, individual reads, ordinary saves
   and score updates reuse the existing tool handlers and input limits.
+- Active mandatory records at scores 99-100 are surfaced. Retrieval/access lowers
+  an elevated record to 79; its configured turn interval (five turns by default)
+  brings it back to 99.
 - Agent saves and updates retain the score-92 ceiling and protected-target checks.
   Owner dashboard writes retain the existing owner-specific upper-score behavior.
 - The existing dashboard pages provide list/detail, search, model editing,
   recycle/restore, access tracking, pop actions, decay controls/previews and nudge
   controls through an explicit route allowlist.
 - Bounded statistics and backend-neutral health/mode APIs support the existing
-  browser status widgets without accessing Chroma collections or writer guards.
+  browser status widgets without opening a separate storage backend or writer lock.
 - Both decay periods remain configurable through the existing dashboard config
   schema. Scoring formulas, score ranges and floor values are not changed here.
-- Heartbeats use the selected runtime's active-time clock without legacy takeover
-  or watchdog side effects. Idle wall time is not charged on owner restart.
+- Dashboard handoff heartbeats renew a 30-second control lease. If they stop,
+  control returns to the connected MCP service. This watchdog changes logical
+  write authority only; it does not terminate the host-owned stdio process.
+- Activity heartbeats use the selected runtime's active-time clock. Idle wall
+  time is not charged on owner restart.
 - Backend-neutral readiness reports store access, binding presence and explicit
   experimental status. Binding presence is not a live embedding-provider probe.
 
@@ -77,6 +84,18 @@ is used. Cosine products retain the same operation order and double precision.
 No dependency, schema, search-score, clock, pop or ordering changes are introduced.
 Cold scans still validate every record; larger scans exceed the cache bounds and
 must validate the unadmitted remainder. This is not an index or a scalability guarantee.
+
+### Namespaced score extensions
+
+New modules can store additive scoring parameters with
+`SQLiteSegmentAdapter.patch_score_extension(record_id, namespace, changes)`. The
+method validates bounded JSON and merges the patch transactionally into the
+record's `score_extensions[namespace]` metadata. Modules should use a stable
+package/reverse-domain namespace and version their own payload. This avoids
+module-specific SQL columns and survives metadata writes, score changes, backups
+and migration. Extension factors do not change retrieval ordering by themselves;
+modules that intentionally change the canonical importance score must call the
+existing `update_score` contract and preserve owner/agent write policy.
 
 ### Synthetic performance checks
 
@@ -130,13 +149,17 @@ These controls do not protect against a malicious local user or process. Slow
 requests can temporarily occupy the serialized owner; existing request timeouts
 and the bounded backlog limit this, but do not provide production throughput.
 
-## Intentionally unavailable
+## Recycle and permanent deletion
 
-Agent deletion, admin reset, dashboard backup/recovery and writer handoff
-are disabled, not emulated. Owner-only single recycled-record purge is available
-with [explicit opt-in and exact ID confirmation](SQLITE_PURGE.md); it remains
-disabled by default. The MCP tool list excludes deletion; direct attempted
-deletion returns an explicit refusal. Unsupported dashboard endpoints return 501.
+`instinct_delete_memory` moves an eligible record into SQLite's recoverable recycle
+bin. It preserves record metadata and vectors and refuses protected owner records.
+Read-only observers can capture this soft-recycle request only when queue capture
+is explicitly enabled; replay records a receipt transactionally. Permanent purge,
+admin reset and dashboard backup/recovery remain unavailable. Writer handoff is
+available only while a connected MCP stdio service can receive control. Owner-
+only single recycled-record purge is available with
+[explicit opt-in and exact ID confirmation](SQLITE_PURGE.md); it remains disabled
+by default. Unsupported dashboard endpoints return 501.
 The page displays an experimental-capability notice; some legacy buttons remain
 visible and are safely refused by the server rather than presented as working.
 
@@ -147,10 +170,10 @@ pending queues. Explicit schema-3 replay classifies but never acknowledges legac
 records. A cancelled/disconnected caller does not cancel
 an accepted owner operation; confirm persistence before retrying a write.
 
-Ordinary MCP saves/score updates now have [explicit opt-in pending capture and
-receipt-based replay](SQLITE_PENDING_WRITES.md). Use `--read-only --queue-writes`
+Ordinary MCP saves, score updates and soft-recycle requests have [explicit opt-in
+pending capture and receipt-based replay](SQLITE_PENDING_WRITES.md). Use `--read-only --queue-writes`
 for a capture observer or `--replay-pending` for an owner, never both. Queueing is
-not a database commit, and this capability does not add automatic writer handoff.
+not a database commit; queue-capture mode does not support dashboard handoff.
 
 ## Explicit launch
 
@@ -209,8 +232,10 @@ capacity, and active-clock/access/vector persistence across restart. Existing
 active-time and both pop suites remain regression requirements.
 
 Before a live switch: obtain explicit owner approval for private-data access and
-service changes; complete full-state/sidecar migration and backup/restore policy;
-review deletion and [legacy queue disposition](SQLITE_QUEUE_REVIEW.md) if required; validate actual embedding-provider
-behavior and performance on representative data. Packaging still includes the
-existing Chroma dependency: this integration is not a Chroma-free release or a
-claim that upstream advisories are resolved.
+service changes; validate staged full-state/sidecar migration and backup/restore
+policy; review [legacy queue disposition](SQLITE_QUEUE_REVIEW.md) if required;
+validate actual embedding-provider behavior and performance on representative
+data. Legacy storage and process-control modules are removed from this profile.
+The offline migration exporter accepts an already-open collection object but
+does not construct a legacy client or import a legacy database file. Keep any
+legacy source environment separate from the SQLite runtime.

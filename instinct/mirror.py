@@ -6,15 +6,16 @@ Real-time conversation capture and segmentation with logical
 breakpoints and overlap.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from .models import Segment, SegmentType, ScoredSegment, ProjectIdentity
 from .scorer import SegmentScorer, ScoringConfig
-from .store import InstinctStore
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class ConversationMirror:
     def __init__(
         self,
         project: ProjectIdentity,
-        store: Optional[InstinctStore] = None,
+        store: Optional[Any] = None,
         config: Optional[MirrorConfig] = None,
         scorer_config: Optional[ScoringConfig] = None,
     ):

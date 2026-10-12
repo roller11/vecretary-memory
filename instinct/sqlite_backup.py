@@ -16,10 +16,39 @@ from .sqlite_store import SQLiteRecordStore
 
 
 SIDECARS = frozenset({'session_state.json', 'nudge_state.json', 'dormancy_config.json'})
+IDENTITY_FILE = 'embedding-identity.json'
 MAX_FILE_BYTES = 256 * 1024 * 1024
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_FILES = 1024
 MANIFEST = 'snapshot.json'
+
+
+def _json_object_without_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate JSON key')
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value):
+    raise ValueError('Non-finite JSON constant')
+
+
+def _validate_identity_payload(payload, expected_identity):
+    if payload is None:
+        return
+    try:
+        value = json.loads(payload.decode('utf-8'),
+                           object_pairs_hook=_json_object_without_duplicates,
+                           parse_constant=_reject_json_constant)
+        actual = EmbeddingIdentity.from_dict(value)
+        canonical_json(value)
+    except (UnicodeError, TypeError, ValueError, RecursionError) as error:
+        raise ValueError('Invalid runtime embedding identity') from error
+    if actual != expected_identity:
+        raise ValueError('Runtime embedding identity mismatch')
 
 
 def _directory(value):
@@ -39,11 +68,22 @@ def _read(path, limit=MAX_FILE_BYTES):
 
 def _payloads(root):
     result = {}
-    allowed = SIDECARS | {'sqlite', 'fallback_pending', RUNTIME_LOCK_FILENAME, MANIFEST}
+    allowed = SIDECARS | {IDENTITY_FILE, 'sqlite', 'fallback_pending',
+                          RUNTIME_LOCK_FILENAME, MANIFEST}
     for path in root.iterdir():
         if path.name not in allowed:
             raise ValueError('Unknown runtime state; snapshot refused')
-        if path.name in SIDECARS:
+        if path.name == IDENTITY_FILE:
+            result[path.name] = _read(path, 4096)
+            try:
+                value = json.loads(result[path.name].decode('utf-8'),
+                                   object_pairs_hook=_json_object_without_duplicates,
+                                   parse_constant=_reject_json_constant)
+                EmbeddingIdentity.from_dict(value)
+                canonical_json(value)
+            except (UnicodeError, TypeError, ValueError, RecursionError) as error:
+                raise ValueError('Invalid runtime embedding identity') from error
+        elif path.name in SIDECARS:
             result[path.name] = _read(path, 1024 * 1024)
             state = json.loads(result[path.name])
             if not isinstance(state, dict):
@@ -115,6 +155,7 @@ def snapshot_offline(root, destination, identity):
         if queue.exists() or queue.is_symlink():
             stack.enter_context(private_file_lock(_directory(queue) / '.capture.lock', timeout=0))
         payloads = _payloads(root)
+        _validate_identity_payload(payloads.get(IDENTITY_FILE), identity)
         with SQLiteRecordStore.open_read_only(root / 'sqlite', identity) as repository:
             count = repository.count()
             repository.list_records(limit=MAX_RECORDS, recycled='all')
@@ -139,6 +180,7 @@ def _validated_snapshot(snapshot, identity):
             manifest['queue_policy'] != 'preserve-no-replay'):
         raise ValueError('Unsupported snapshot or embedding identity')
     payloads = _payloads(snapshot)
+    _validate_identity_payload(payloads.get(IDENTITY_FILE), identity)
     if manifest['files'] != _inventory(payloads):
         raise ValueError('Snapshot integrity mismatch')
     with SQLiteRecordStore.open_read_only(snapshot / 'sqlite', identity) as repository:

@@ -70,9 +70,9 @@ downloaded by the Vecretary initializer. Users must separately review the
 chosen provider/model's terms and provenance; provider-reported metadata is
 not independent model/training-data licensing certification.
 
-Chroma and its native wheel are not dependencies of this profile. Legacy source
-interfaces remain in the package but do not bundle the Chroma implementation.
-No Chroma patch wheel or private runtime data is distributed here.
+No legacy vector-store library, native wheel or server is bundled by this profile.
+The offline migration helper only accepts a caller-supplied open collection and
+does not bundle or construct its source database client.
 
 Wisdom implementation, credentials and premium dependencies are not included.
 See [API boundary](docs/WISDOM_BOUNDARY.md). Premium support is separate.

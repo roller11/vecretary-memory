@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -56,6 +57,6 @@ def test_dashboard_accepts_both_decay_periods_and_floor(band):
 
 
 def test_dashboard_explains_new_ranges():
-    source = dashboard.Path(dashboard.__file__).read_text(encoding='utf-8')
+    source = Path(dashboard.__file__).read_text(encoding='utf-8')
     assert 'plateau (80-89; upper standard fallback)' in source
     assert 'mid (50-79)' in source
