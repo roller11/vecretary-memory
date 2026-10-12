@@ -20,8 +20,11 @@ the current verification below. Do not publish until reviewed and accepted.
   check exposed a launcher-path bug: base installations keep console scripts
   in their configured scripts directory, not next to the Python executable.
   The checker now uses sysconfig, with Windows/Linux regression coverage.
-  Follow-up release/export/policy tests: 34 passed, one skipped. Hosted CI must
-  complete again before merge.
+  Follow-up release/export/policy tests: 34 passed, one skipped. Follow-up
+  hosted push and PR workflows passed on the current head: Linux Python 3.11
+  and 3.12 each reported 1,154 passed/four skipped; experimental native Windows
+  reported 1,136 passed/22 skipped. All three advisory audits passed with no
+  findings. Platform skips and Windows support caveats still apply.
 - This is RC integration, not a merged release or native Windows production
   certification. Do not import private live data, configurations, rollback
   packages, or maintenance helpers.
