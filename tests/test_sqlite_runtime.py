@@ -175,6 +175,16 @@ def test_mandatory_access_uses_existing_nudge_drop_and_clock_anchor(runtime):
     assert runtime.get_mandatory() == []
 
 
+def test_score_99_remains_mandatory_until_access_drops_it_to_79(runtime):
+    segment = insert(runtime, 100, SegmentType.STANDING_INSTRUCTION)
+    assert runtime.update_score(segment.id, 99, 'synthetic nudge fixture')
+    assert runtime.get_mandatory()[0].id == segment.id
+    assert runtime.stats()['mandatory_count'] == 1
+    assert runtime.record_access(segment.id)
+    assert runtime.get(segment.id).importance_score == 79
+    assert runtime.get_mandatory() == []
+
+
 def test_read_only_adapter_does_not_mutate_record_or_clock(runtime):
     segment = insert(runtime)
     before = runtime.repository.get_record(segment.id)

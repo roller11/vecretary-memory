@@ -20,6 +20,7 @@ FIXED = {
     'docs/assets/dashboard-mobile-dark.png': 'docs/assets/dashboard-mobile-dark.png',
     'docs/assets/dashboard-mobile-light.png': 'docs/assets/dashboard-mobile-light.png',
     'instinct/assets/vecretary-logo-512.png': 'instinct/assets/vecretary-logo-512.png',
+    'instinct/assets/vecretary-logo-256.png': 'instinct/assets/vecretary-logo-256.png',
     'instinct/assets/vecretary-logo-full.png': 'instinct/assets/vecretary-logo-full.png',
     'docs/DASHBOARD_AUTH_SECURITY.md': 'docs/DASHBOARD_AUTH_SECURITY.md',
     'docs/SQLITE_OFFLINE_BACKUP.md': 'docs/SQLITE_OFFLINE_BACKUP.md',
@@ -27,6 +28,7 @@ FIXED = {
     'docs/SQLITE_PURGE.md': 'docs/SQLITE_PURGE.md',
     'docs/SQLITE_QUEUE_REVIEW.md': 'docs/SQLITE_QUEUE_REVIEW.md',
     'docs/RC_ALPHA_NOTES.md': 'docs/RC_ALPHA_NOTES.md',
+    'docs/RC_TESTING.md': 'docs/RC_TESTING.md',
     'docs/RELEASE_GATES.md': 'docs/RELEASE_GATES.md',
     'docs/PUBLIC_README.md': 'README.md',
     'docs/PUBLIC_CLIENT_ACCEPTANCE.md': 'docs/CLIENT_ACCEPTANCE.md',
@@ -71,6 +73,7 @@ BINARY_FILES = {
     'docs/assets/dashboard-mobile-dark.png',
     'docs/assets/dashboard-mobile-light.png',
     'instinct/assets/vecretary-logo-512.png',
+    'instinct/assets/vecretary-logo-256.png',
     'instinct/assets/vecretary-logo-full.png',
 }
 

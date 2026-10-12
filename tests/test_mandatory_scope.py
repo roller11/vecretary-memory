@@ -78,7 +78,7 @@ def test_conditional_scope_survives_session_renewal_and_controls_inclusion(tmp_p
 
     assert nudge.renew_mandatory(store) == 1
     restored = store.get(memory.id)
-    assert restored.importance_score == 100
+    assert restored.importance_score == 99
     assert restored.mandatory_scope == "conditional"
     retriever = PriorityRetriever(store=SimpleNamespace())
     assert not retriever._should_include_mandatory(restored, QueryContext(task_tags={"garden"}))

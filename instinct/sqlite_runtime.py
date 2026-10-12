@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .active_time import capture_anchors, set_anchor
 from .decay import PopModifier
-from .models import ScoredSegment
+from .models import MANDATORY_SCORE_MIN, ScoredSegment
 from .sqlite_records import MAX_RECORDS
 from .sqlite_queries import BoundQueryEmbedder, SQLiteSegmentQueries
 from .sqlite_writes import BoundDocumentEmbedder, SQLiteSegmentWrites
@@ -64,7 +64,7 @@ class SQLiteSegmentAdapter(SQLiteSegmentWrites, SQLiteSegmentQueries):
         return [self._segment(record) for record in records]
 
     def get_mandatory(self, include_recycled=False):
-        return self.get_by_score(100, 100, include_recycled=include_recycled)
+        return self.get_by_score(MANDATORY_SCORE_MIN, 100, include_recycled=include_recycled)
 
     def count(self):
         return self.repository.count()
@@ -76,7 +76,7 @@ class SQLiteSegmentAdapter(SQLiteSegmentWrites, SQLiteSegmentQueries):
         active = [segment for segment in segments if not segment.segment.metadata.get(RECYCLED_AT_KEY)]
         return {
             'total_segments': len(segments),
-            'mandatory_count': sum(segment.importance_score == 100 for segment in active),
+            'mandatory_count': sum(segment.is_mandatory for segment in active),
             'high_priority_count': sum(segment.importance_score >= 70 for segment in active),
             'accessed_count': sum(segment.access_count > 0 for segment in segments),
             'popped_count': sum(segment.popped_at is not None for segment in segments),

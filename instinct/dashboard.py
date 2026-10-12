@@ -893,7 +893,8 @@ async function dashboardFetch(path, options = {}) {
   if (target.origin !== location.origin) throw new Error('Cross-origin request denied');
   const headers = new Headers(options.headers || {});
   if ((options.method || 'GET').toUpperCase() === 'POST') {
-    const readable = ['/api/ready','/api/heartbeat','/api/score/recommend'].includes(target.pathname);
+    const readable = ['/api/ready','/api/heartbeat','/api/score/recommend',
+      '/api/mode/take_control','/api/mode/return_control'].includes(target.pathname);
     const search = target.pathname === '/api/search_with_pop' && JSON.parse(options.body || '{}').apply_pops === false && JSON.parse(options.body || '{}').track_access === false;
     if (!instinctCanWrite() && !readable && !search) throw new Error('Read-only SQLite observer: restart the SQLite service in owner mode before editing');
     headers.set('X-Instinct-Capability', instinctCapability);
@@ -909,7 +910,80 @@ async function dashboardFetch(path, options = {}) {
     return fetch(path, {...options, headers});
   });
 }
+function dashboardApplySharedTheme() {
+  let theme = 'dark';
+  try { theme = localStorage.getItem('instinct:theme') === 'light' ? 'light' : 'dark'; } catch {}
+  if (theme === 'light') document.body.setAttribute('data-theme', 'light');
+  else document.body.removeAttribute('data-theme');
+  const button = document.getElementById('theme-toggle');
+  if (button) button.textContent = theme === 'light' ? '🌙' : '☀';
+}
+function dashboardToggleSharedTheme() {
+  const current = document.body.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  const next = current === 'light' ? 'dark' : 'light';
+  try { localStorage.setItem('instinct:theme', next); } catch {}
+  if (next === 'light') document.body.setAttribute('data-theme', 'light');
+  else document.body.removeAttribute('data-theme');
+  dashboardApplySharedTheme();
+}
+function dashboardInstallSharedHeader() {
+  const header = document.querySelector('body > header:not(.app-bar)');
+  if (!header) return;
+  const sourceTitle = header.querySelector('h1');
+  const pageName = (sourceTitle?.textContent || document.title).replace(/^Vecretary Memory\\s*[—-]\\s*/, '').trim();
+  const retained = [...header.children].filter(child => child !== sourceTitle && child.tagName !== 'A' && !child.matches('div[style*="flex"]'));
+  header.classList.add('app-bar', 'secondary-app-bar');
+  header.setAttribute('role', 'banner');
+  header.replaceChildren();
+
+  const brand = document.createElement('a');
+  brand.href = '/';
+  brand.className = 'brand';
+  brand.title = 'Vecretary Memory Dashboard - home';
+  const logo = document.createElement('img');
+  logo.className = 'brand-mark';
+  logo.src = '/assets/vecretary-logo-256.png';
+  logo.alt = 'Vecretary Memory logo';
+  brand.appendChild(logo);
+
+  const nav = document.createElement('nav');
+  nav.className = 'primary-nav';
+  nav.setAttribute('aria-label', 'Primary dashboard');
+  const activeHref = location.pathname === '/score' ? '/score' :
+    location.pathname === '/decay' ? '/decay' :
+    location.pathname === '/modifier' || location.hash === '#segments-section' ? '/#segments-section' : '/';
+  for (const [label, href] of [['Overview', '/'], ['Memories', '/#segments-section'], ['Score helper', '/score'], ['Decay', '/decay']]) {
+    const link = document.createElement('a');
+    link.href = href;
+    link.textContent = label;
+    if (href === activeHref) link.setAttribute('aria-current', 'page');
+    nav.appendChild(link);
+  }
+
+  const context = document.createElement('div');
+  context.className = 'header-context';
+  const title = document.createElement('h1');
+  title.className = 'page-title';
+  title.textContent = pageName;
+  context.appendChild(title);
+  const actions = document.createElement('div');
+  actions.className = 'header-tools';
+  actions.setAttribute('role', 'group');
+  actions.setAttribute('aria-label', 'Page actions');
+  retained.forEach(element => actions.appendChild(element));
+  const themeButton = document.createElement('button');
+  themeButton.id = 'theme-toggle';
+  themeButton.type = 'button';
+  themeButton.setAttribute('aria-label', 'Toggle color theme');
+  themeButton.title = 'Toggle light / dark theme';
+  themeButton.addEventListener('click', dashboardToggleSharedTheme);
+  actions.appendChild(themeButton);
+  context.appendChild(actions);
+  header.append(brand, nav, context);
+}
 document.addEventListener('DOMContentLoaded', async () => {
+  dashboardInstallSharedHeader();
+  dashboardApplySharedTheme();
   const readOnlyPreference = document.getElementById('instinct-prefer-readonly');
   if (readOnlyPreference) {
     try { readOnlyPreference.checked = localStorage.getItem('instinct:preferReadOnly') === '1'; } catch {}
@@ -941,8 +1015,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   --border: #334239;
   --text: #e5ede7;
   --text-dim: #9aada0;
-  --accent: #20873d;
-  --accent-h: #35b95a;
+  --accent: #176331;
+  --accent-h: #237943;
   --brand-bright: #5bec7d;
   --brand-deep: #246f3a;
   --success: #1d7136;
@@ -951,14 +1025,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   --danger-h: #c44835;
 }
 body[data-theme="light"] {
-  --bg: #eff4f0;
-  --surface: #ffffff;
-  --surface-2: #e6efe8;
+  --bg: #d9dcda;
+  --surface: #e6e8e7;
+  --surface-2: #d2d7d4;
   --border: #c9d9cd;
   --text: #1a241d;
   --text-dim: #4f6255;
   --accent: #246f3a;
-  --accent-h: #1e9e43;
+  --accent-h: #287a43;
   --brand-bright: #157a34;
   --brand-deep: #285a38;
   --idle-bg: #e6efe8;
@@ -1075,9 +1149,422 @@ svg { background-color: var(--surface-2); }
   .picker select, .picker input {min-width:0; max-width:100%; width:100%;}
   .stage {grid-template-columns:1fr 50px 1fr 70px;}
 }
+:root {
+  --control-shadow: 0 2px 4px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.14);
+  --control-shadow-hover: 0 4px 9px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.20);
+  --control-shadow-pressed: inset 0 2px 4px rgba(0,0,0,.24);
+}
+body[data-theme="light"] {
+  --control-shadow: 0 2px 4px rgba(24,50,32,.14), inset 0 1px 0 rgba(255,255,255,.82);
+  --control-shadow-hover: 0 4px 9px rgba(24,50,32,.18), inset 0 1px 0 rgba(255,255,255,.94);
+  --control-shadow-pressed: inset 0 2px 4px rgba(24,50,32,.16);
+}
+button,
+input[type="button"], input[type="submit"], input[type="reset"],
+[role="button"], .btn, .button,
+.header-primary, .app-bar nav a, .actions-menu > summary, .score-cta, .mod-link {
+  box-sizing: border-box;
+  height: max(24px, calc(1lh + 5px));
+  min-height: max(24px, calc(1lh + 5px));
+  padding-block: 0;
+  line-height: inherit;
+  display: inline-flex;
+  align-items: center;
+  background-image: linear-gradient(180deg, rgba(255,255,255,.13), rgba(0,0,0,.07));
+  box-shadow: var(--control-shadow);
+  transition: background-color .14s ease, border-color .14s ease, box-shadow .14s ease, transform .14s ease, filter .14s ease;
+}
+button:hover:not(:disabled),
+input[type="button"]:hover, input[type="submit"]:hover, input[type="reset"]:hover,
+[role="button"]:hover, .btn:hover, .button:hover,
+.header-primary:hover, .app-bar nav a:hover, .actions-menu > summary:hover,
+.score-cta:hover, .mod-link:hover {
+  box-shadow: var(--control-shadow-hover);
+  filter: saturate(1.04);
+  transform: translateY(-1px);
+}
+button:active:not(:disabled),
+input[type="button"]:active, input[type="submit"]:active, input[type="reset"]:active,
+[role="button"]:active, .btn:active, .button:active,
+.header-primary:active, .app-bar nav a:active, .actions-menu > summary:active,
+.score-cta:active, .mod-link:active {
+  box-shadow: var(--control-shadow-pressed);
+  filter: none;
+  transform: translateY(1px);
+}
+button:disabled, input[type="button"]:disabled, input[type="submit"]:disabled, input[type="reset"]:disabled {
+  background-image: none;
+  box-shadow: none;
+  filter: none;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  button, input[type="button"], input[type="submit"], input[type="reset"],
+  [role="button"], .btn, .button, .header-primary, .app-bar nav a,
+  .actions-menu > summary, .score-cta, .mod-link {
+    transition: none;
+    transform: none !important;
+  }
+}
+</style>"""
+        surface_layers = """<style>
+:root {
+  --surface-raised: #202923;
+  --surface-inset: #151b17;
+  --frame-shadow: 0 3px 12px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.035);
+  --list-shadow: inset 0 2px 8px rgba(0,0,0,.16), inset 0 1px 0 rgba(255,255,255,.025);
+  --decay-score-100: #ffd166;
+  --decay-score-90: #ff8f70;
+  --decay-score-80: #4cc9f0;
+  --decay-score-70: #c8a7ff;
+  --decay-score-50: #ff8fab;
+  --decay-score-20: #8ce99a;
+  --decay-floor-color: #ff6b6b;
+  --header-gradient-start: #101a14;
+  --header-gradient-mid: #183a25;
+  --header-gradient-end: #386543;
+}
+body[data-theme="light"] {
+  --surface-raised: #eceeed;
+  --surface-inset: #d2d7d4;
+  --frame-shadow: 0 3px 12px rgba(24,50,32,.09), inset 0 1px 0 rgba(255,255,255,.88);
+  --list-shadow: inset 0 2px 8px rgba(24,50,32,.07), inset 0 1px 0 rgba(255,255,255,.72);
+  --decay-score-100: #9a6700;
+  --decay-score-90: #c2412d;
+  --decay-score-80: #006d91;
+  --decay-score-70: #6741d9;
+  --decay-score-50: #b4235a;
+  --decay-score-20: #287a3a;
+  --decay-floor-color: #b42318;
+  --header-gradient-start: #cfd9d2;
+  --header-gradient-mid: #dce2de;
+  --header-gradient-end: #e6e8e7;
+}
+body[data-theme="light"] #readonly-banner {
+  background: #762727 !important;
+  border-bottom-color: #c95a5a !important;
+  color: #fff !important;
+}
+body .panel, body .picker, body .stage, body .section {
+  background-image: linear-gradient(145deg, var(--surface-raised), var(--surface) 72%);
+  box-shadow: var(--frame-shadow);
+}
+body .status-bar {
+  background-image: linear-gradient(100deg, var(--surface-2), var(--surface-raised));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+}
+body #seg-list {
+  background-color: var(--surface-inset);
+  background-image: linear-gradient(180deg, var(--surface-inset), var(--surface-2));
+  box-shadow: var(--list-shadow);
+}
+body #segments-section #seg-list .seg-item {
+  background-color: var(--surface);
+  background-image: linear-gradient(105deg, color-mix(in srgb, var(--surface-raised) 70%, transparent), transparent 72%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent);
+}
+body #segments-section #seg-list .seg-item:nth-child(even) {
+  background-color: color-mix(in srgb, var(--surface-2) 24%, var(--surface));
+}
+body #segments-section #seg-list .seg-item:hover:not(.selected) {
+  background-image: linear-gradient(105deg, color-mix(in srgb, var(--accent) 12%, var(--surface-2)), var(--surface) 72%);
+}
+body #segments-section #seg-list .seg-item.selected {
+  background-image: linear-gradient(105deg, color-mix(in srgb, var(--accent) 23%, var(--surface-raised)), color-mix(in srgb, var(--accent) 11%, var(--surface)));
+}
+body #graph, body #bumpGraph {
+  border: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 2px 8px rgba(0,0,0,.12);
+}
+body #tunables fieldset[data-range] {
+  --range-color: var(--decay-score-80);
+  box-sizing: border-box;
+  min-width: 0;
+  margin: 10px 0;
+  padding: 10px 10px 6px;
+  border: 2px solid var(--range-color);
+  border-radius: 8px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--range-color) 7%, var(--surface-2)), var(--surface-2));
+}
+body #tunables fieldset[data-range="mandatory"] { --range-color: var(--decay-score-100); }
+body #tunables fieldset[data-range^="tier-"] { --range-color: var(--decay-score-90); }
+body #tunables fieldset[data-range="plateau"] { --range-color: var(--decay-score-80); }
+body #tunables fieldset[data-range="mid"] {
+  --range-color: var(--decay-score-70);
+  box-shadow: inset 0 0 0 1px var(--decay-score-50);
+}
+body #tunables fieldset[data-range="tail"] { --range-color: var(--decay-score-20); }
+body #tunables fieldset[data-range] > legend {
+  padding: 0 6px;
+  color: var(--range-color);
+  font-weight: 700;
+}
+body #tunables fieldset[data-range] input,
+body #tunables fieldset[data-range] select {
+  border-color: color-mix(in srgb, var(--range-color) 68%, var(--border));
+}
+body #tunables fieldset[data-range] input:focus-visible,
+body #tunables fieldset[data-range] select:focus-visible { outline-color: var(--range-color); }
+body #legend .swatch { box-shadow: 0 0 0 1px var(--border); }
+body header.app-bar {
+  position: static !important;
+  inset-block-start: auto !important;
+  z-index: auto;
+  display: grid;
+  grid-template-columns: minmax(340px, 1fr) minmax(0, 2fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px 24px;
+  min-height: 280px;
+  height: 280px;
+  max-height: 280px;
+  padding: 10px 16px;
+  box-sizing: border-box;
+  background-color: var(--header-gradient-start);
+  background-image: linear-gradient(135deg, var(--header-gradient-start) 0%, var(--header-gradient-mid) 58%, var(--header-gradient-end) 100%);
+  border-bottom: 1px solid color-mix(in srgb, var(--header-gradient-end) 42%, var(--border));
+  box-shadow: 0 7px 22px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.07);
+  backdrop-filter: none;
+}
+body header.app-bar > .brand {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 256px;
+  white-space: nowrap;
+}
+body header.app-bar .brand-mark {
+  display: block;
+  width: 256px;
+  height: 256px;
+  flex: 0 0 256px;
+  object-fit: contain;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+  filter: drop-shadow(0 4px 12px rgba(0,0,0,.28));
+}
+body header.app-bar .brand-wordmark { font-size: 20px; font-weight: 700; }
+body header.app-bar .primary-nav {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-basis: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-content: end;
+  min-width: 0;
+  overflow: visible;
+  padding-bottom: 0;
+  order: 0;
+}
+body header.secondary-app-bar .primary-nav { gap: 5px; }
+body header.secondary-app-bar .primary-nav a {
+  color: var(--text-dim);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background-color: var(--surface-2);
+  font-size: 14px;
+  font-weight: 550;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+body header.secondary-app-bar .primary-nav a:hover {
+  background-color: var(--surface-raised);
+  color: var(--text);
+}
+body header.app-bar .primary-nav a[aria-current="page"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--header-gradient-end) 28%, transparent);
+  border-color: color-mix(in srgb, var(--header-gradient-end) 65%, var(--border));
+}
+body header.app-bar > .header-tools {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: end;
+  align-self: start;
+  width: auto;
+  margin: 0;
+  order: 0;
+}
+body header.app-bar #theme-toggle {
+  width: max(24px, calc(1lh + 5px));
+  min-width: max(24px, calc(1lh + 5px));
+  height: max(24px, calc(1lh + 5px));
+  min-height: max(24px, calc(1lh + 5px));
+  padding: 0;
+  border-radius: 10px;
+}
+body header.app-bar #recycle-link {
+  box-sizing: border-box;
+  width: max(24px, calc(1lh + 5px));
+  min-width: max(24px, calc(1lh + 5px));
+  height: max(24px, calc(1lh + 5px));
+  min-height: max(24px, calc(1lh + 5px));
+  padding: 0;
+  justify-content: center;
+  border-radius: 10px;
+  font-size: 14px;
+}
+body header.secondary-app-bar .header-context {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  min-width: 0;
+  align-self: start;
+}
+body header.secondary-app-bar .page-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 650;
+}
+body header.secondary-app-bar .header-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin: 0;
+}
+@media (max-width: 900px) {
+  body header.app-bar {
+    grid-template-columns: minmax(0, 256px) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    padding: 10px 12px;
+    gap: 8px 14px;
+  }
+  body header.app-bar > .brand {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    flex-direction: row;
+    justify-content: center;
+    gap: 10px;
+    min-height: 256px;
+    white-space: nowrap;
+  }
+  body header.app-bar .brand-mark {
+    width: 256px;
+    height: 256px;
+    flex-basis: 256px;
+  }
+  body header.app-bar .primary-nav {
+    grid-column: 2;
+    grid-row: 1;
+    justify-content: flex-end;
+    align-content: center;
+    flex-wrap: wrap;
+    overflow: visible;
+    max-width: 100%;
+  }
+  body header.app-bar > .header-tools {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: stretch;
+    align-self: center;
+    width: 100%;
+    min-width: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  body header.secondary-app-bar .header-context {
+    grid-column: 2;
+    grid-row: 2;
+    flex-direction: row;
+    justify-content: space-between;
+    text-align: left;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  body header.secondary-app-bar .header-tools { justify-content: flex-end; }
+}
+@media (max-width: 520px) {
+  body header.app-bar {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 112px 42px minmax(0, 1fr);
+    padding: 8px 10px;
+    gap: 4px;
+  }
+  body header.app-bar > .brand {
+    grid-column: 1;
+    grid-row: 1;
+    min-height: 0;
+  }
+  body header.app-bar .brand-mark {
+    width: 112px;
+    height: 112px;
+    flex-basis: 112px;
+  }
+  body header.app-bar .primary-nav {
+    grid-column: 1;
+    grid-row: 2;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 0;
+  }
+  body header.app-bar .primary-nav a,
+  body header.app-bar .primary-nav button {
+    height: 34px;
+    min-height: 34px;
+    padding-inline: 10px;
+  }
+  body header.app-bar > .header-tools {
+    grid-column: 1;
+    grid-row: 3;
+    justify-self: stretch;
+    width: 100%;
+    justify-content: flex-start;
+  }
+  body header.app-bar .header-primary,
+  body header.app-bar #theme-toggle,
+  body header.app-bar .actions-menu > summary {
+    height: 34px;
+    min-height: 34px;
+    padding-inline: 10px;
+  }
+  body header.app-bar #recycle-link {
+    width: 34px;
+    min-width: 34px;
+    height: 34px;
+    min-height: 34px;
+    padding: 0;
+  }
+  body header.app-bar #theme-toggle {
+    width: 34px;
+    min-width: 34px;
+    padding: 0;
+  }
+  body header.secondary-app-bar .header-context {
+    grid-column: 1;
+    grid-row: 3;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 4px;
+  }
+  body header.secondary-app-bar .header-tools {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
 </style>"""
         body = body.replace("<head>", "<head>" + bootstrap, 1)
         body = body.replace("</head>", responsive + "</head>", 1)
+        body = body.replace("</body>", surface_layers + "</body>", 1)
         nonce = secrets.token_urlsafe(24)
         handlers = set(re.findall(r'on(?:click|submit)="([^"]+)"', body))
         hashes = ' '.join("'sha256-" + base64.b64encode(hashlib.sha256(html.unescape(handler).encode()).digest()).decode() + "'" for handler in sorted(handlers))
@@ -1160,9 +1647,10 @@ svg { background-color: var(--surface-2); }
                 return self._send_json({"capability": self.server.capability_token})
             if url.path == "/" or url.path == "/index.html":
                 return self._send_html(INDEX_HTML)
-            if url.path == "/assets/vecretary-logo.png":
+            if url.path in ("/assets/vecretary-logo.png", "/assets/vecretary-logo-256.png"):
+                logo_name = "vecretary-logo-256.png" if url.path == "/assets/vecretary-logo-256.png" else "vecretary-logo-512.png"
                 image = resources.files("instinct").joinpath(
-                    "assets", "vecretary-logo-512.png").read_bytes()
+                    "assets", logo_name).read_bytes()
                 self.send_response(200)
                 self._security_headers()
                 self.send_header("Content-Type", "image/png")
@@ -1862,13 +2350,33 @@ MODE_BANNER_HTML = r"""
                  margin: 8px 12px 0; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
   .mode-banner.write    { background: var(--success); border: 1px solid var(--success-h); color: #fff; }
   .mode-banner.read_only{ background: var(--danger); border: 1px solid var(--danger-h); color: #fff; }
-  .mode-banner .status { font-size: 11px; color: var(--text-dim); }
+  .mode-banner .status { font-size: 11px; color: inherit; }
   .mode-banner .read-only-preference { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-weight: 500; cursor: pointer; }
-  .mode-banner .read-only-preference-note { font-size: 10px; font-weight: 400; color: var(--text-dim); }
+  .mode-banner .read-only-preference-note { font-size: 10px; font-weight: 400; color: inherit; opacity: .9; }
+  .mode-banner .handoff-actions { display: flex; align-items: center; gap: 6px; }
+  .mode-banner button[hidden] { display: none !important; }
+  header:not(.app-bar) > a[href="/"],
+  header:not(.app-bar) > a[href="/decay"],
+  header:not(.app-bar) > a[href="/score"] {
+    display: inline-flex; align-items: center; min-height: 38px;
+    margin: 4px 6px 4px 0; padding: 0 12px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-2); color: var(--text);
+    font-size: 13px; font-weight: 550; text-decoration: none;
+  }
+  header:not(.app-bar) > a[href="/"]:hover,
+  header:not(.app-bar) > a[href="/decay"]:hover,
+  header:not(.app-bar) > a[href="/score"]:hover {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
 </style>
 <div class="mode-banner" id="mode-banner">
   <span class="status" id="mode-banner-status">checking mode...</span>
   <span>One SQLite owner serves MCP and dashboard requests.</span>
+  <span class="handoff-actions" aria-label="Writer handoff controls">
+    <button type="button" id="handoff-to-dashboard" hidden>Take Dashboard Control</button>
+    <button type="button" id="handoff-to-mcp" hidden>Return to MCP</button>
+  </span>
   <label class="read-only-preference" title="Browser-local preference; the SQLite service still enforces write permissions.">
     <input type="checkbox" id="instinct-prefer-readonly" aria-describedby="read-only-preference-note">
     <span>Prefer read-only</span>
@@ -1880,9 +2388,12 @@ MODE_BANNER_HTML = r"""
 (async function modeInit() {
   const banner = document.getElementById('mode-banner');
   const status = document.getElementById('mode-banner-status');
+  const takeButton = document.getElementById('handoff-to-dashboard');
+  const returnButton = document.getElementById('handoff-to-mcp');
   // Keep the owner SQLite session active while the dashboard is in use.
   let heartbeatTimer = null;
   let inWriteMode = false;
+  let handoffBusy = false;
 
   function startHeartbeat() {
     if (heartbeatTimer) return;
@@ -1901,17 +2412,57 @@ MODE_BANNER_HTML = r"""
     } catch (e) { /* ignore — watchdog will handle timeout */ }
   }
 
+  async function handoff(path, button, label) {
+    if (handoffBusy) return;
+    handoffBusy = true;
+    button.disabled = true;
+    button.textContent = 'Transferring...';
+    let handoffError = '';
+    try {
+      const response = await dashboardFetch(path, { method: 'POST', body: '{}' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || result.error || 'Handoff was refused');
+      status.textContent = result.message || 'Write control transferred.';
+      await refresh();
+    } catch (error) {
+      handoffError = label + ' failed: ' + error.message;
+    } finally {
+      handoffBusy = false;
+      button.textContent = label;
+      await refresh();
+      if (handoffError) status.textContent = handoffError;
+    }
+  }
+
+  takeButton.addEventListener('click', () =>
+    handoff('/api/mode/take_control', takeButton, 'Take Dashboard Control'));
+  returnButton.addEventListener('click', () =>
+    handoff('/api/mode/return_control', returnButton, 'Return to MCP'));
+
   // Refresh mode and start/stop heartbeat accordingly
   async function refresh() {
     try {
       const r = await dashboardFetch('/api/mode');
       const j = await r.json();
       if (j.backend === 'sqlite') {
-        banner.className = 'mode-banner ' + j.mode;
-        status.textContent = j.read_only
-          ? 'SQLITE OBSERVER (browse only; owner service required for writes)'
-          : 'SQLITE OWNER (MCP and dashboard share one service)';
-        if (j.read_only) stopHeartbeat(); else startHeartbeat();
+        const dashboardOwnsControl = j.dashboard_control === true;
+        const mcpAvailable = j.mcp_available === true;
+        const handoffAvailable = j.handoff_supported === true;
+        instinctReadOnly = !dashboardOwnsControl;
+        banner.className = 'mode-banner ' + (dashboardOwnsControl ? 'write' : 'read_only');
+        status.textContent = dashboardOwnsControl
+          ? 'Dashboard has write control; MCP tools are paused.'
+          : mcpAvailable && handoffAvailable
+            ? 'MCP is connected; dashboard write control is available.'
+            : mcpAvailable
+              ? 'MCP is connected; dashboard handoff is unavailable with queue capture enabled.'
+            : 'SQLite observer (browse only; connect MCP to hand off write control).';
+        takeButton.hidden = !mcpAvailable || dashboardOwnsControl || !handoffAvailable;
+        returnButton.hidden = !mcpAvailable || !dashboardOwnsControl;
+        takeButton.disabled = handoffBusy || !handoffAvailable;
+        returnButton.disabled = handoffBusy;
+        dashboardApplyWriteState();
+        if (!dashboardOwnsControl) stopHeartbeat(); else startHeartbeat();
         return;
       }
       status.textContent = 'Unsupported storage service';
@@ -2270,7 +2821,23 @@ DECAY_HTML = """<!doctype html>
 <script>
 let config = {};
 const SCORES = [100, 90, 80, 70, 50, 20];
-const COLORS = ['#5bec7d', '#239447', '#9af2b0', '#37bd64', '#b9f5c7', '#2b7040'];
+const SCORE_LINE_STYLES = {
+  100: {color: 'var(--decay-score-100)', dash: ''},
+  90: {color: 'var(--decay-score-90)', dash: '6 2'},
+  80: {color: 'var(--decay-score-80)', dash: '2 2'},
+  70: {color: 'var(--decay-score-70)', dash: '8 3'},
+  50: {color: 'var(--decay-score-50)', dash: '4 2'},
+  20: {color: 'var(--decay-score-20)', dash: '1 3'},
+};
+
+function lineStyleForScore(score) {
+  if (score === 100) return SCORE_LINE_STYLES[100];
+  if ([90, 94, 95].includes(score)) return SCORE_LINE_STYLES[90];
+  if (score >= 80) return SCORE_LINE_STYLES[80];
+  if (score >= 65) return SCORE_LINE_STYLES[70];
+  if (score >= 50) return SCORE_LINE_STYLES[50];
+  return SCORE_LINE_STYLES[20];
+}
 
 function toast(msg, isError) {
   const t = document.getElementById('toast');
@@ -2297,16 +2864,32 @@ function fillForm() {
   let fields = document.getElementById('tunables');
   if (!fields) { fields = document.createElement('div'); fields.id = 'tunables'; root.insertBefore(fields, root.querySelector('div[style]')); }
   fields.replaceChildren();
+  const tierGroups = new Map();
   function addFields(values, parent, prefix = '') {
     for (const [key, value] of Object.entries(values)) {
       if (key === 'session_state') continue;
       const path = prefix + key;
       if (value && typeof value === 'object') {
         const group = document.createElement('fieldset');
+        group.dataset.range = key;
         const legend = document.createElement('legend'); legend.textContent = ({plateau: 'plateau (80-89; upper standard fallback)', mid: 'mid (50-79)', tail: 'tail (0-49)', mandatory: 'mandatory (99-100)'})[key] || key.replaceAll('_', ' '); group.appendChild(legend);
         addFields(value, group, path + '.'); parent.appendChild(group); continue;
       }
       const label = document.createElement('label'); label.textContent = key.replaceAll('_', ' ');
+      let fieldParent = parent;
+      const tierMatch = !prefix && key.match(/^tier_(90|94|95)_/);
+      if (tierMatch) {
+        const tier = tierMatch[1];
+        fieldParent = tierGroups.get(tier);
+        if (!fieldParent) {
+          fieldParent = document.createElement('fieldset');
+          fieldParent.dataset.range = 'tier-' + tier;
+          const legend = document.createElement('legend'); legend.textContent = 'tier ' + tier;
+          fieldParent.appendChild(legend);
+          tierGroups.set(tier, fieldParent);
+          parent.appendChild(fieldParent);
+        }
+      }
       let control;
       if (key === 'decay_function') {
         control = document.createElement('select');
@@ -2314,7 +2897,7 @@ function fillForm() {
       } else {
         control = document.createElement('input'); control.type = 'number'; control.min = '0'; control.step = 'any';
       }
-      control.dataset.field = path; control.value = value; label.appendChild(control); parent.appendChild(label);
+      control.dataset.field = path; control.value = value; label.appendChild(control); fieldParent.appendChild(label);
     }
   }
   addFields(config, fields);
@@ -2352,17 +2935,21 @@ function drawGraph(series) {
     svg += `<text x="${x(min)}" y="${H-P+12}" fill="#888" font-size="10" text-anchor="middle">${d}d</text>`;
   }
   // series
-  series.forEach((s, i) => {
+  series.forEach(s => {
     const pts = s.decay.map(p => `${x(p.t_min)},${y(p.score)}`).join(' ');
-    svg += `<polyline points="${pts}" fill="none" stroke="${COLORS[i % COLORS.length]}" stroke-width="1.5" opacity="0.85"/>`;
+    const style = lineStyleForScore(s.score);
+    const dash = s.selected ? '6 4' : style.dash;
+    const dashAttr = dash ? ` stroke-dasharray="${dash}"` : '';
+    svg += `<polyline points="${pts}" fill="none" stroke="${style.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"${dashAttr}/>`;
   });
   // dormant floor line
-  svg += `<line x1="${P}" x2="${W-P}" y1="${y(config.mandatory.floor)}" y2="${y(config.mandatory.floor)}" stroke="#b03030" stroke-dasharray="3,3" stroke-width="0.5"/>`;
-  svg += `<text x="${W-P-4}" y="${y(config.mandatory.floor)-4}" fill="#b03030" font-size="10" text-anchor="end">mandatory floor (${config.mandatory.floor})</text>`;
+  svg += `<line x1="${P}" x2="${W-P}" y1="${y(config.mandatory.floor)}" y2="${y(config.mandatory.floor)}" stroke="var(--decay-floor-color)" stroke-dasharray="3,3" stroke-width="1"/>`;
+  svg += `<text x="${W-P-4}" y="${y(config.mandatory.floor)-4}" fill="var(--decay-floor-color)" font-size="10" text-anchor="end">mandatory floor (${config.mandatory.floor})</text>`;
   document.getElementById('graph').innerHTML = svg;
-  document.getElementById('legend').innerHTML = series.map((s, i) =>
-    `<span><span class="swatch" style="background:${COLORS[i % COLORS.length]}"></span>score ${s.score}</span>`
-  ).join(' &nbsp; ');
+  document.getElementById('legend').innerHTML = series.map(s => {
+    const style = lineStyleForScore(s.score);
+    return `<span><span class="swatch" style="background:${style.color}"></span>${s.selected ? 'selected · ' : ''}score ${s.score}</span>`;
+  }).join(' &nbsp; ') + ` &nbsp; <span><span class="swatch" style="background:var(--decay-floor-color)"></span>mandatory floor</span>`;
 }
 
 function drawBump(series) {
@@ -2377,7 +2964,7 @@ function drawBump(series) {
     svg += `<line x1="${P}" x2="${W-P}" y1="${y(g)}" y2="${y(g)}" stroke="#333" stroke-width="0.5"/>`;
   }
   const path = pts.map(p => `${x(p.t_min)},${y(p.score)}`).join(' ');
-  svg += `<polyline points="${path}" fill="none" stroke="#5bec7d" stroke-width="1.5"/>`;
+  svg += `<polyline points="${path}" fill="none" stroke="${lineStyleForScore(100).color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`;
   document.getElementById('bumpGraph').innerHTML = svg;
 }
 
@@ -2398,7 +2985,9 @@ async function redraw() {
     if (selectedId) {
       const selected = await api('/api/get?id=' + encodeURIComponent(selectedId));
       document.getElementById('selected-preview').textContent = 'Projection for ' + selected.title + ' (continuous active time, not stored history)';
-      series.push(await api('/api/decay/series?score=' + selected.score + '&profile=' + encodeURIComponent(selected.decay_profile) + '&days=30'));
+      const selectedSeries = await api('/api/decay/series?score=' + selected.score + '&profile=' + encodeURIComponent(selected.decay_profile) + '&days=30');
+      selectedSeries.selected = true;
+      series.push(selectedSeries);
     }
     for (const score of SCORES) {
       const s = await api('/api/decay/series?score=' + score + '&profile=standard&days=30');
@@ -2525,7 +3114,7 @@ SCORE_HTML = """<!doctype html>
     <label class="opt"><input type="radio" name="q2" value="solid"> Solid context (comes and goes with relevance)
       <small>Saved as 90. Quick drop to 89, then slow linear to floor 60 over 200h active.</small></label>
     <label class="opt"><input type="radio" name="q2" value="mandatory"> Mandatory standing instruction
-      <small>Saved as 100. Always surfaces, bump-timer every 30min active. Use sparingly.</small></label>
+      <small>Saved as 100. Session/turn reminders rise to 99 and return to 79 after model access. Use sparingly.</small></label>
   </div>
 
   <div class="panel">
@@ -2676,8 +3265,8 @@ INDEX_HTML = r"""<!doctype html>
     --border:    #334239;
     --text:      #e5ede7;
     --text-dim:  #9aada0;
-    --accent:    #20873d;
-    --accent-h:  #35b95a;
+    --accent:    #176331;
+    --accent-h:  #237943;
     --brand-bright: #5bec7d;
     --brand-deep: #246f3a;
     --success:   #1d7136;
@@ -2686,14 +3275,14 @@ INDEX_HTML = r"""<!doctype html>
     --danger-h:  #c44835;
   }
   body[data-theme="light"] {
-    --bg:        #eff4f0;
-    --surface:   #ffffff;
-    --surface-2: #e6efe8;
+    --bg:        #d9dcda;
+    --surface:   #e6e8e7;
+    --surface-2: #d2d7d4;
     --border:    #c9d9cd;
     --text:      #1a241d;
     --text-dim:  #4f6255;
     --accent:    #246f3a;
-    --accent-h:  #1e9e43;
+    --accent-h:  #287a43;
     --brand-bright: #157a34;
     --brand-deep: #285a38;
   }
@@ -2857,7 +3446,10 @@ INDEX_HTML = r"""<!doctype html>
     white-space: nowrap;
   }
   .header-primary:hover { background: var(--accent-h); border-color: var(--accent-h); color: #fff; }
-  .header-tools #theme-toggle { min-width: 44px; min-height: 44px; font-size: 14px; }
+  .header-tools #theme-toggle {
+    min-width: 44px; min-height: 44px; padding: 0; border-radius: 10px;
+    font-size: 14px;
+  }
   .actions-menu { position: relative; }
   .actions-menu > summary {
     list-style: none;
@@ -3609,8 +4201,16 @@ INDEX_HTML = r"""<!doctype html>
       padding: 0 12px;
       font-size: 14px;
     }
-    .header-primary, .actions-menu > summary, .header-tools #theme-toggle {
+    .header-primary, .actions-menu > summary {
       min-height: 44px;
+    }
+    body header.app-bar #recycle-link,
+    body header.app-bar #theme-toggle {
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      min-height: 44px;
+      padding: 0;
     }
     .app-shell .section { min-height: 360px; }
     #segments-section { min-height: 480px; }
@@ -3622,15 +4222,14 @@ INDEX_HTML = r"""<!doctype html>
 <body>
 <header class="app-bar" role="banner">
   <a href="/" class="brand" title="Vecretary Memory Dashboard — home">
-    <img class="brand-mark" src="/assets/vecretary-logo.png" alt="">
-    Vecretary Memory
+    <img class="brand-mark" src="/assets/vecretary-logo-256.png" alt="Vecretary Memory">
   </a>
   <nav class="primary-nav" aria-label="Primary dashboard">
     <a href="/" aria-current="page">Overview</a>
     <a href="#segments-section">Memories</a>
     <a href="/score">Score helper</a>
     <a href="/decay">Decay</a>
-    <button type="button" class="nav-action" id="recycle-link" aria-haspopup="dialog" aria-controls="rb-overlay" onclick="loadRecycled()">Recycle bin</button>
+    <button type="button" class="nav-action" id="recycle-link" aria-label="Recycle bin" title="Recycle bin" aria-haspopup="dialog" aria-controls="rb-overlay" onclick="loadRecycled()">♻</button>
   </nav>
   <div class="header-tools" role="group" aria-label="Dashboard actions">
     <span id="session-badge" class="pill idle" title="Session clock: drives decay tick + pop math. Updated on every tool call and dashboard interaction.">
@@ -3643,7 +4242,7 @@ INDEX_HTML = r"""<!doctype html>
       <div class="actions-menu-panel" role="group" aria-label="Additional dashboard actions">
         <button type="button" id="export-btn" onclick="exportJson()" title="Export all segments as JSON (keyboard: x)">Export JSON</button>
         <button type="button" id="pop-search-btn" onclick="onPopSearch()" title="Audit pop activity on the current search result">Pop audit</button>
-        <button type="button" onclick="pullMandatory()" title="Simulate retrieving every mandatory (score-100) segment">Pull mandatory</button>
+        <button type="button" onclick="pullMandatory()" title="Simulate retrieving every mandatory (score 99-100) segment">Pull mandatory</button>
         <button type="button" onclick="runNudge()" title="Check due mandatory elevations without advancing the turn counter">Nudge check</button>
         <button type="button" onclick="loadList()" title="Re-fetch the segment list from the store">Refresh list</button>
       </div>
@@ -4469,15 +5068,15 @@ async function bulkRecycle() {
 
 async function pullMandatory() {
   // One-click: simulate the agent retrieving every mandatory
-  // (score-100) segment. This actually calls record_access via
-  // /api/access, which triggers the nudge drop (100->79) — the same
+  // (score-99-100) segment. This actually calls record_access via
+  // /api/access, which triggers the nudge drop (99/100->79) — the same
   // path the MCP retriever uses. After this returns, the list is
   // refreshed and the dropped segments disappear from the top of
   // the list (they're now 79, not 100). Useful for confirming that
   // the nudge system is wired correctly and for testing the cycle.
   if (!allSegs.length) { toast('List not loaded yet', true); return; }
-  const mandatory = allSegs.filter(s => s.score === 100);
-  if (!mandatory.length) { toast('No mandatory segments at 100', true); return; }
+  const mandatory = allSegs.filter(s => s.score >= 99);
+  if (!mandatory.length) { toast('No mandatory segments at 99+', true); return; }
   try {
     const r = await api('/api/access', {
       method: 'POST',
@@ -4488,7 +5087,7 @@ async function pullMandatory() {
     toast('Access failed: ' + e.message, true);
     return;
   }
-  // Scroll to the top (the dropped ones are no longer at 100)
+  // Scroll to the top (the dropped ones are no longer at 99+)
   const list = document.getElementById('seg-list');
   list.scrollTop = 0;
   // Reload so the list reflects the new scores

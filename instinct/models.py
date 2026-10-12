@@ -237,6 +237,8 @@ class SegmentType(Enum):
 
 
 # Segment types that automatically get score 100
+MANDATORY_SCORE_MIN = 99
+
 MANDATORY_TYPES = {
     SegmentType.STANDING_INSTRUCTION,
     SegmentType.CRITICAL_CONSTRAINT,
@@ -355,8 +357,8 @@ class ScoredSegment:
     
     @property
     def is_mandatory(self) -> bool:
-        """Score 100 items must always be retrieved."""
-        return self.importance_score == 100
+        """Score 99-100 items are always retrieved."""
+        return self.importance_score >= MANDATORY_SCORE_MIN
 
     @property
     def is_mandatory_memory(self) -> bool:
@@ -454,7 +456,7 @@ class ScoredSegment:
             source=data.get("source", ""),
             metadata={
                 **{k: v for k, v in data.items() if k not in reserved_keys},
-                "mandatory_scope": data.get("mandatory_scope", "always" if data["importance_score"] == 100 else "standard"),
+                "mandatory_scope": data.get("mandatory_scope", "always" if data["importance_score"] >= MANDATORY_SCORE_MIN else "standard"),
                 "mandatory_tags": parse_tag_list(data.get("mandatory_tags", "")),
             },
         )
@@ -570,12 +572,12 @@ class ProjectIdentity:
                 parts.append(f"{i}. {goal}")
         
         if self.standing_instructions:
-            parts.append("\n## Standing Instructions (Score 100)")
+            parts.append("\n## Standing Instructions (Score 99-100)")
             for inst in self.standing_instructions:
                 parts.append(f"- {inst}")
         
         if self.critical_constraints:
-            parts.append("\n## Critical Constraints (Score 100)")
+            parts.append("\n## Critical Constraints (Score 99-100)")
             for const in self.critical_constraints:
                 parts.append(f"- {const}")
         
@@ -607,7 +609,7 @@ class PopResultRecord:
 class RetrievalResult:
     """Result from priority context retrieval."""
 
-    # Mandatory items (score 100) - always included
+    # Mandatory items (score 99-100) - always included
     mandatory: List[ScoredSegment] = field(default_factory=list)
 
     # Query-relevant items (sorted by score descending)
@@ -785,7 +787,7 @@ class RetrievalResult:
         if not self.mandatory and self.acknowledgement_memories:
             parts.append(self.acknowledgement_context())
 
-        # Always include mandatory (score 100) — but respect the budget
+        # Always include mandatory (score 99-100) — but respect the budget
         if self.mandatory:
             parts.append("## MANDATORY CONTEXT (Must Follow)")
             parts.append("")

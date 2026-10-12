@@ -59,7 +59,7 @@ def test_connection_renewal_is_once_and_explicit_event_rearms(store):
     assert all(record.importance_score == 79 for record in store.records.values())
     lifecycle.request()
     assert lifecycle.restore_if_pending(store)
-    assert all(record.importance_score == 100 for record in store.records.values())
+    assert all(record.importance_score == 99 for record in store.records.values())
 
 
 def test_readonly_renewal_remains_pending_without_writes(store, monkeypatch):
@@ -84,7 +84,7 @@ def test_failed_renewal_retries_without_reseeding(store, monkeypatch):
         lifecycle.restore_if_pending(store)
     monkeypatch.setattr(store, 'update_metadata_only', update)
     assert lifecycle.restore_if_pending(store)
-    assert all(record.importance_score == 100 for record in store.records.values())
+    assert all(record.importance_score == 99 for record in store.records.values())
 
 
 def test_renewal_does_not_resurrect_deleted_starters(store):

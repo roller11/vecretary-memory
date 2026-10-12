@@ -318,5 +318,5 @@ def test_mandatory_renewal_and_access_drop_rebase_the_curve(clock, sqlite_store)
     assert current_effective_score(dropped, end, cfg) == 79
     assert renew_mandatory(store) == 1
     renewed = store.get(memory.id)
-    assert current_effective_score(renewed, end + timedelta(days=7), cfg) == 100
+    assert current_effective_score(renewed, end + timedelta(days=7), cfg) == 99
     assert elapsed_hours(renewed, "last_bumped_at", clock) == 0

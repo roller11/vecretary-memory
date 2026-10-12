@@ -21,9 +21,13 @@ to arbitrary executor workers. At most 16 requests can be in flight or queued.
 Shutdown drains accepted operations before closing the owning connection.
 
 Stdio MCP and the browser dashboard can share this owner in one process. Each
-stdio connection has its own mandatory-renewal lifecycle. There is no new shared
-writer socket protocol or automatic writer takeover. Other owners of the same
-runtime root are rejected. Read-only observers acquire neither writer guard.
+stdio connection has its own mandatory-renewal lifecycle. The dashboard offers
+an explicit, same-origin handoff: MCP tool calls pause while dashboard routes
+hold logical write control, then resume when control returns to MCP. The host-
+owned stdio process stays connected; the dashboard does not kill or relaunch it.
+When an observer session is promoted, the service must first acquire SQLite's
+writer guard; a competing owner causes a safe refusal without removing locks.
+Read-only observers acquire neither writer guard until a handoff succeeds.
 
 Request-local bindings select the adapter, dormancy configuration and default
 activity clock without changing legacy global stores or environment configuration.
@@ -37,6 +41,9 @@ cross-file operation or an exactly-once protocol.
 
 - MCP context, mandatory reads, semantic search, individual reads, ordinary saves
   and score updates reuse the existing tool handlers and input limits.
+- Active mandatory records at scores 99-100 are surfaced. Retrieval/access lowers
+  an elevated record to 79; its configured turn interval (five turns by default)
+  brings it back to 99.
 - Agent saves and updates retain the score-92 ceiling and protected-target checks.
   Owner dashboard writes retain the existing owner-specific upper-score behavior.
 - The existing dashboard pages provide list/detail, search, model editing,
@@ -46,8 +53,11 @@ cross-file operation or an exactly-once protocol.
   browser status widgets without opening a separate storage backend or writer lock.
 - Both decay periods remain configurable through the existing dashboard config
   schema. Scoring formulas, score ranges and floor values are not changed here.
-- Heartbeats use the selected runtime's active-time clock without legacy takeover
-  or watchdog side effects. Idle wall time is not charged on owner restart.
+- Dashboard handoff heartbeats renew a 30-second control lease. If they stop,
+  control returns to the connected MCP service. This watchdog changes logical
+  write authority only; it does not terminate the host-owned stdio process.
+- Activity heartbeats use the selected runtime's active-time clock. Idle wall
+  time is not charged on owner restart.
 - Backend-neutral readiness reports store access, binding presence and explicit
   experimental status. Binding presence is not a live embedding-provider probe.
 
@@ -145,8 +155,9 @@ and the bounded backlog limit this, but do not provide production throughput.
 bin. It preserves record metadata and vectors and refuses protected owner records.
 Read-only observers can capture this soft-recycle request only when queue capture
 is explicitly enabled; replay records a receipt transactionally. Permanent purge,
-admin reset, dashboard backup/recovery and writer handoff remain unavailable or
-separately gated. Owner-only single recycled-record purge is available with
+admin reset and dashboard backup/recovery remain unavailable. Writer handoff is
+available only while a connected MCP stdio service can receive control. Owner-
+only single recycled-record purge is available with
 [explicit opt-in and exact ID confirmation](SQLITE_PURGE.md); it remains disabled
 by default. Unsupported dashboard endpoints return 501.
 The page displays an experimental-capability notice; some legacy buttons remain
@@ -162,7 +173,7 @@ an accepted owner operation; confirm persistence before retrying a write.
 Ordinary MCP saves, score updates and soft-recycle requests have [explicit opt-in
 pending capture and receipt-based replay](SQLITE_PENDING_WRITES.md). Use `--read-only --queue-writes`
 for a capture observer or `--replay-pending` for an owner, never both. Queueing is
-not a database commit, and this capability does not add automatic writer handoff.
+not a database commit; queue-capture mode does not support dashboard handoff.
 
 ## Explicit launch
 

@@ -7,14 +7,25 @@
 - Agent-agnostic stdio MCP retrieval, saving, score updates, and recoverable
   recycle, with the active-session clock, mandatory lifecycle, decay, and both
   existing pop behaviors retained.
+- Active mandatory scores 99-100 are periodically resurfaced at 99 (five turns
+  by default); accessing them lowers their score to 79 until the next nudge.
 - Local dashboard, observer mode, opt-in pending-write capture/replay, offline
   backup/restore, queue review, and explicitly confirmed recycled-record purge.
+- Refined charcoal/green and neutral-light dashboard with shared secondary-page
+  navigation, saved themes, and the packaged 256px logo.
+- Capability-protected MCP/dashboard write-control handoff with browser lease
+  recovery; the host-owned stdio process remains attached.
 - Namespaced additive score extensions for future modules.
 - Opt-in, offline migration tooling that preserves record metadata, embeddings,
   recognized runtime sidecars, and pending queue bytes. Migration does not replay
   queues or make the imported runtime ready.
 
 ## Candidate verification
+
+The October 12 integrated iteration restores the complete UI without reverting
+the handoff/reminder work and adds experimental native Windows hosted checks.
+See [integrated RC testing](docs/RC_TESTING.md). The older verification below
+records a prior milestone, not the final integrated candidate's test result.
 
 The controlled Windows Python 3.12.5 run passed 1,108 tests with 18
 platform-specific skips. A fresh local wheel install passed dependency
@@ -43,7 +54,7 @@ made. The vector-recall-dependent importance proposal is not implemented.
 
 ## Contact
 
-General support: support@raw-wire.com. Sensitive security reports:
+General support is best-effort via support@raw-wire.com; no response time or
+service-level agreement is guaranteed. Sensitive security reports:
 security@raw-wire.com. External code contributions are not accepted initially.
-Premium Wisdom and support remain separate from the MPL-2.0 core; no alpha
-support SLA is promised.
+Premium Wisdom and support remain separate from the MPL-2.0 core.

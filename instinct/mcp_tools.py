@@ -166,7 +166,7 @@ class InstinctSaveMemoryTool(MCPTool):
 
 
 class InstinctGetMandatoryTool(MCPTool):
-    """Get all mandatory (score 100) items."""
+    """Get active mandatory items (score 99-100)."""
     
     @_validated_execution
     async def execute(self, **kwargs) -> MCPToolResult:
@@ -181,10 +181,16 @@ class InstinctGetMandatoryTool(MCPTool):
                     error_message="Instinct not initialized",
                 )
             
+            store = getattr(retriever, "store", None)
             if kwargs.get("new_session", False):
+                if store is None:
+                    return MCPToolResult.error("Mandatory renewal unavailable")
                 from .nudge import renew_mandatory
-                renew_mandatory(retriever.store)
+                renew_mandatory(store)
             mandatory = retriever.retrieve_mandatory()
+            access_batch = getattr(store, "record_access_batch", None)
+            if mandatory and callable(access_batch) and not getattr(store, "_read_only", False):
+                access_batch([segment.id for segment in mandatory])
             retrieval_result = RetrievalResult(mandatory=mandatory)
             items = [
                 {
@@ -343,7 +349,7 @@ def get_instinct_tools() -> List[MCPTool]:
     tools = [
         InstinctGetContextTool(
             name="instinct_get_context",
-            description="Retrieve context from Instinct. Returns mandatory guardrails (score 100) and relevant context.",
+            description="Retrieve context from Instinct. Returns mandatory guardrails (score 99-100) and relevant context.",
             parameters=[
                 ToolParameter(name="query", param_type=ParamType.STRING, description="Query to find context for", required=True),
                 ToolParameter(name="max_tokens", param_type=ParamType.INTEGER, description="Max tokens", required=False, default=8000),
@@ -366,7 +372,7 @@ def get_instinct_tools() -> List[MCPTool]:
         ),
         InstinctGetMandatoryTool(
             name="instinct_get_mandatory",
-            description="Get all mandatory (score 100) guardrails that MUST be followed.",
+            description="Get active mandatory (score 99-100) guardrails that MUST be followed.",
             parameters=[
                 ToolParameter(name="new_session", param_type=ParamType.BOOLEAN, description="True once at new chat/session or window reload to renew existing active mandatories", required=False, default=False),
             ],

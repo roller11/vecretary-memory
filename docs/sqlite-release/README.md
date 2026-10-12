@@ -44,7 +44,10 @@ This alpha is not approved for regulated, hostile or multi-tenant environments.
   access tracking and both temporary-pop mechanisms. Search scoring is unchanged;
   it is not the proposed `importance + semantic / 2` formula.
 - Active-session timer, turn/session tick, mandatory renewal and nudge scheduling.
-  Idle time is not charged on restart. Tokens acknowledge retrieval, not compliance.
+  Scores 99-100 are surfaced; access lowers an elevated mandatory to 79 and its
+  configured turn interval (five turns by default) restores it to 99. Idle time
+  is not charged on restart.
+  Tokens acknowledge retrieval, not compliance.
 - Configurable initial-drop and later-decay periods, curves, floors and retention.
   Bands include 0-49, 50-79 and 80-89, whose default floor is 60; special upper
   profiles remain. Ordinary agent scores are capped at 92; mandatory/higher
@@ -190,7 +193,8 @@ access/pop behavior and promotion rules remain unchanged.
 
 The public core uses plain [MPL-2.0](LICENSE), without premium-use restrictions.
 Wisdom is a separate private/premium API module, not bundled or required by this
-runtime. Premium support is offered separately; no alpha SLA is promised.
+runtime. General support is best-effort via support@raw-wire.com; no response
+time or service-level agreement is guaranteed. Premium support is offered separately.
 See [Wisdom boundary](docs/WISDOM_BOUNDARY.md) and
 [contribution policy](CONTRIBUTING.md): issues are welcome, external code
 contributions are not accepted initially.
@@ -204,5 +208,6 @@ memories, credentials or databases. See [security](SECURITY.md) and
 [Sponsor Vecretary's developer](https://github.com/sponsors/roller11) to help fund
 open-source maintenance, tests and documentation. Sponsorship is optional; it does
 not change MPL-2.0 rights, include Wisdom, purchase premium support or guarantee
-features or response times. Contact support@raw-wire.com about separately offered
-support. Sensitive vulnerability reports go to security@raw-wire.com.
+features or response times. General support is best-effort via
+support@raw-wire.com, with no response-time guarantee or service-level
+agreement. Sensitive vulnerability reports go to security@raw-wire.com.

@@ -43,7 +43,7 @@ class FeatureStore:
             selected, key=lambda item: item.importance_score, reverse=True)[:limit]]
 
     def get_mandatory(self, include_recycled=False):
-        return self.get_by_score(100, 100, limit=len(self.memories), include_recycled=include_recycled)
+        return self.get_by_score(99, 100, limit=len(self.memories), include_recycled=include_recycled)
 
     def list_recycled(self, limit=200):
         return [deepcopy(segment) for segment in self.memories.values()
@@ -130,7 +130,7 @@ def test_dashboard_header_and_logo_use_packaged_same_origin_asset(feature_dashbo
     server, _, _ = feature_dashboard
     status, body, headers = request(server, method='GET', route='/')
     assert status == 200
-    assert b'<img class="brand-mark" src="/assets/vecretary-logo.png" alt="">' in body
+    assert b'<img class="brand-mark" src="/assets/vecretary-logo-256.png" alt="Vecretary Memory">' in body
     assert b"prefers-reduced-motion: reduce" in body
     assert b"--surface-2" in body
     assert "img-src 'self' data:" in headers['Content-Security-Policy']
@@ -141,6 +141,40 @@ def test_dashboard_header_and_logo_use_packaged_same_origin_asset(feature_dashbo
     assert headers['X-Content-Type-Options'] == 'nosniff'
     assert image == dashboard.resources.files('instinct').joinpath(
         'assets', 'vecretary-logo-512.png').read_bytes()
+
+    status, image, headers = request(server, method='GET', route='/assets/vecretary-logo-256.png')
+    assert status == 200
+    assert headers['Content-Type'] == 'image/png'
+    assert headers['X-Content-Type-Options'] == 'nosniff'
+    assert image == dashboard.resources.files('instinct').joinpath(
+        'assets', 'vecretary-logo-256.png').read_bytes()
+
+
+@pytest.mark.parametrize('route', ['/', '/score', '/decay'])
+def test_dashboard_pages_share_nonsticky_header_and_navigation(feature_dashboard, route):
+    server, _, _ = feature_dashboard
+    status, body, _ = request(server, method='GET', route=route)
+    assert status == 200
+    assert b'dashboardInstallSharedHeader' in body
+    assert b'position: static !important;' in body
+    assert b'height: 280px;' in body
+    assert b'/assets/vecretary-logo-256.png' in body
+    assert b'--header-gradient-start' in body
+    assert b'--header-gradient-mid' in body
+    assert b'--header-gradient-end' in body
+    assert b'Primary dashboard' in body
+    assert b'Score helper' in body
+
+
+def test_decay_plot_and_settings_share_palette(feature_dashboard):
+    server, _, _ = feature_dashboard
+    status, body, _ = request(server, method='GET', route='/decay')
+    assert status == 200
+    for score in (100, 90, 80, 70, 50, 20):
+        assert f"color: 'var(--decay-score-{score})'".encode() in body
+    assert b'border: 2px solid var(--range-color)' in body
+    assert b'fieldParent.dataset.range = ' in body
+    assert b'stroke-dasharray=' in body
 
 
 def payload(**updates):

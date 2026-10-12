@@ -208,12 +208,12 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "include_mandatory": {
                         "type": "boolean",
-                        "description": "Include all mandatory (score=100) items",
+                        "description": "Include active mandatory items (score 99-100)",
                         "default": True
                     },
                     "new_session": {
                         "type": "boolean",
-                        "description": "True once on a new chat/session or window reload: renew existing active mandatory memories to 100 before retrieval.",
+                        "description": "True once on a new chat/session or window reload: refresh existing active mandatory memories before retrieval.",
                         "default": False
                     }
                 },
@@ -258,7 +258,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="instinct_get_mandatory",
-            description="Get all mandatory (score=100) context items. These are non-negotiable constraints and instructions.",
+            description="Get active mandatory context items (score 99-100). These are non-negotiable constraints and instructions.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -634,6 +634,9 @@ async def _handle_get_mandatory(store, arguments: dict) -> list[types.TextConten
     from instinct.models import RetrievalResult
 
     mandatory = store.get_mandatory()
+    record_access_batch = getattr(store, 'record_access_batch', None)
+    if mandatory and callable(record_access_batch) and not getattr(store, '_read_only', False):
+        await run_store_call(store, record_access_batch, [segment.id for segment in mandatory])
     retrieval_result = RetrievalResult(mandatory=mandatory)
     content = (
         f"Found {len(mandatory)} mandatory items:\n\n{retrieval_result.to_context_string()}"
@@ -683,6 +686,9 @@ async def _handle_search(store, arguments: dict) -> list[types.TextContent]:
             min_similarity=max(0.0, float(floor)),
         )
     )
+    record_access_batch = getattr(store, 'record_access_batch', None)
+    if segments and callable(record_access_batch) and not getattr(store, '_read_only', False):
+        await run_store_call(store, record_access_batch, [segment.id for segment in segments])
 
 
     pipeline = create_default_pipeline()
@@ -746,6 +752,10 @@ async def _handle_get(store, arguments: dict) -> list[types.TextContent]:
             type="text",
             text=f"Error: No segment found with ID '{segment_id}'"
         )]
+
+    record_access = getattr(store, 'record_access', None)
+    if callable(record_access) and not getattr(store, '_read_only', False):
+        await run_store_call(store, record_access, segment_id)
 
     text = (
         f"[{segment.importance_score}] {segment.concept_title}\n"

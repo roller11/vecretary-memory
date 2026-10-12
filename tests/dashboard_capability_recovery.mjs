@@ -20,7 +20,12 @@ const context = vm.createContext({
   setInterval() { return 1; },
   location: {href: 'http://127.0.0.1:9876/', origin: 'http://127.0.0.1:9876'},
   document: {
+    body: {
+      setAttribute() {},
+      removeAttribute() {},
+    },
     addEventListener(event, handler) { if (event === 'DOMContentLoaded') domReadyHandler = handler; },
+    querySelector() { return null; },
     querySelectorAll() { return []; },
     getElementById(id) { return id === 'instinct-prefer-readonly' ? readOnlyPreference : null; },
   },

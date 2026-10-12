@@ -39,7 +39,7 @@ class MemoryStore:
                 and (include_recycled or not memory.segment.metadata.get(RECYCLED_AT_KEY))][:limit]
 
     def get_mandatory(self):
-        return self.get_by_score(100, 100)
+        return self.get_by_score(99, 100)
 
     def update_metadata_only(self, memory):
         self.records[memory.id] = deepcopy(memory)
@@ -139,7 +139,7 @@ def test_seeded_session_restore_and_validation_token(memory_store):
     assert all(memory.importance_score == 79 for memory in memory_store.records.values())
     restored = tick_nudge_session(memory_store, now=started + timedelta(minutes=21))
     assert restored.new_session_started
-    assert all(memory.importance_score == 100 for memory in memory_store.records.values())
+    assert all(memory.importance_score == 99 for memory in memory_store.records.values())
     after = RetrievalResult(mandatory=memory_store.get_mandatory())
     assert before.mandatory_fingerprint == after.mandatory_fingerprint
     assert before.validation_token != after.validation_token
