@@ -7,8 +7,16 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from urllib.request import urlopen
+
+
+def console_script_path(name):
+    command = Path(sysconfig.get_path('scripts')) / name
+    if sys.platform == 'win32':
+        command = command.with_suffix('.exe')
+    return command
 
 
 async def check_stdio(root):
@@ -64,9 +72,7 @@ def main():
         'vecretary-init': 'instinct.sqlite_init:cli'}
     for entry in entrypoints.values():
         entry.load()
-        command = Path(sys.executable).parent / entry.name
-        if sys.platform == 'win32':
-            command = command.with_suffix('.exe')
+        command = console_script_path(entry.name)
         result = subprocess.run([str(command), '--help'], capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, entry.name
 

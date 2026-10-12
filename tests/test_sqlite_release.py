@@ -155,3 +155,19 @@ async def test_installed_stdio_checker_accepts_the_runtime_tool_catalog(tmp_path
     await checker.check_stdio(tmp_path)
     session.initialize.assert_awaited_once()
     assert session.call_tool.await_count == 2
+
+
+@pytest.mark.parametrize('platform, executable', [
+    ('win32', 'vecretary-mcp.exe'), ('linux', 'vecretary-mcp'),
+])
+def test_installed_checker_uses_interpreter_scripts_directory(tmp_path, monkeypatch,
+                                                            platform, executable):
+    checker_spec = importlib.util.spec_from_file_location(
+        'sqlite_installed_checker', ROOT / 'tools/check_sqlite_installed.py')
+    checker = importlib.util.module_from_spec(checker_spec)
+    checker_spec.loader.exec_module(checker)
+    scripts = tmp_path / 'Scripts'
+    monkeypatch.setattr(checker.sysconfig, 'get_path', lambda name: str(scripts)
+                        if name == 'scripts' else None)
+    monkeypatch.setattr(checker.sys, 'platform', platform)
+    assert checker.console_script_path('vecretary-mcp') == scripts / executable

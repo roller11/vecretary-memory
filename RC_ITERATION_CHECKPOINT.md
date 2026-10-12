@@ -2,10 +2,29 @@
 
 Updated: 2026-10-12
 
-This is an engineering checkpoint, not release acceptance or a claim that every
-listed change has been pushed. The working tree is based on
-`sqlite-alpha-0.2.0a2-staging` at `d978bed` and contains uncommitted iteration
-changes. Do not publish until the candidate is reviewed and validated.
+This is an engineering checkpoint, not release acceptance. The integrated
+recovery is pushed on `sqlite-alpha-0.2.0a2-staging` through an owner-maintained
+pull request. Earlier investigation sections are historical and superseded by
+the current verification below. Do not publish until reviewed and accepted.
+
+## Current verification - 2026-10-12
+
+- The refined dashboard and cooperative write-control handoff are integrated.
+  Windows source tests: 1,134 passed, 22 skipped. Linux source tests with Node:
+  1,152 passed, four skipped. Final export/service/dashboard checks: 120 passed,
+  one skipped.
+- Separate native Windows and Linux installations contain only three bundled
+  sanitized starter memories. Both installed transport/CLI smoke checks pass;
+  dependency advisory scans report PASS with zero findings.
+- Hosted Linux checks pass on Python 3.11 and 3.12. The first hosted Windows
+  check exposed a launcher-path bug: base installations keep console scripts
+  in their configured scripts directory, not next to the Python executable.
+  The checker now uses sysconfig, with Windows/Linux regression coverage.
+  Follow-up release/export/policy tests: 34 passed, one skipped. Hosted CI must
+  complete again before merge.
+- This is RC integration, not a merged release or native Windows production
+  certification. Do not import private live data, configurations, rollback
+  packages, or maintenance helpers.
 
 ## Data boundary
 
